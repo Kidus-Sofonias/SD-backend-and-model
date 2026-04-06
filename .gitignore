@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.pytest_cache_local/
+.pytest_temp/
+.tmp_pytest/
+
+# Environment files
+.env
+.venv/
+venv/
+
+# SQLite and local database files
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Generated artifacts and temp outputs
+artifacts/
+pytest_tmp_*/
+pytest_cache_phase8*/
+pytest_cache_phase8_run_*/
+sample-count-check-*/
+__conda_tmp_*.txt
+curl
+
+# Editor/OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

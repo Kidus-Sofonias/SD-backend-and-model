@@ -1,0 +1,30 @@
+[project]
+name = "safe-driving-backend"
+version = "0.1.0"
+description = "Safe Driving Super App Backend (FastAPI)"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.110",
+  "uvicorn[standard]>=0.27",
+  "pydantic>=2.6",
+  "pydantic-settings>=2.2",
+  "sqlalchemy>=2.0",
+  "passlib[bcrypt]>=1.7.4",
+  "python-jose[cryptography]>=3.3.0",
+  "numpy>=1.26",
+  "pandas>=2.2",
+  "scikit-learn>=1.4",
+  "joblib>=1.3",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "httpx>=0.27",
+]
+
+[tool.uvicorn]
+factory = false
+
+[tool.ruff]
+line-length = 100

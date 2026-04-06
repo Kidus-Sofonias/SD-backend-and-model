@@ -1,0 +1,61 @@
+# File role: Shared core utilities for configuration, security, JWT handling, logging, and typed application errors.
+# Connects to: nearby package modules via local imports.
+# Key symbols/vars: Settings, settings.
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    app_name: str = "safe-driving-api"
+    app_env: str = "local"
+    app_version: str = "0.1.0"
+    debug: bool = False
+
+    host: str = "127.0.0.1"
+    port: int = 8000
+
+    log_level: str = "INFO"
+    cors_origins: list[str] = [
+        "http://localhost:8081",
+        "http://127.0.0.1:8081",
+        "http://localhost:19006",
+        "http://127.0.0.1:19006",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ]
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_prefix="",
+        case_sensitive=False,
+    )
+    # Auth / Security
+    secret_key: str = "WkJKHgQU7u_FxeQpG2HYv95v-LUCE1rwayUomwq75vrXii-bOV1zB-9A07rsu0E0WQoFS3r7TdRukx9Kl5yI2w"
+    access_token_expire_minutes: int = 60
+    admin_email: str = "admin@sdb.com"
+    admin_password: str = "admin123"
+
+    database_url: str = "sqlite:///./sdbackend.db"
+
+    @field_validator("debug", mode="before")
+    @classmethod
+    def normalize_debug(cls, value):
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"release", "prod", "production"}:
+                return False
+            if lowered in {"debug", "dev", "development"}:
+                return True
+        return value
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def normalize_cors_origins(cls, value):
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return []
+            return [item.strip() for item in stripped.split(",") if item.strip()]
+        return value
+
+settings = Settings()
