@@ -2,6 +2,7 @@
 # Connects to: fastapi, app.core.config, app.core.logging.
 # Key symbols/vars: create_app, app.
 from contextlib import asynccontextmanager
+import logging
 
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
@@ -23,10 +24,15 @@ from app.core.errors import AppError
 
 from app.db.init_db import init_db
 
+logger = logging.getLogger("app.startup")
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    init_db()
+    try:
+        init_db()
+    except Exception:
+        logger.exception("Application startup failed during database initialization.")
+        raise
     yield
 
 def create_app() -> FastAPI:

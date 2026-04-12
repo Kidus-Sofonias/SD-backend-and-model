@@ -50,6 +50,16 @@ class Settings(BaseSettings):
                 return True
         return value
 
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def normalize_database_url(cls, value):
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped.startswith("postgres://"):
+                return "postgresql://" + stripped[len("postgres://") :]
+            return stripped
+        return value
+
     @field_validator("cors_origins_raw", mode="before")
     @classmethod
     def normalize_cors_origins(cls, value):
