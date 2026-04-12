@@ -47,10 +47,13 @@ This backend supports both PostgreSQL and SQLite.
 
 For Render production, use PostgreSQL and set `DATABASE_URL` in the Render service.
 
+Set browser origins with `CORS_ORIGINS_RAW` as a comma-separated list or JSON array.
+
 Example:
 
 ```text
 DATABASE_URL=postgresql://USERNAME:PASSWORD@HOST:5432/DATABASE_NAME
+CORS_ORIGINS_RAW=https://your-admin-site.com,http://localhost:3000
 ```
 
 Keep SQLite only for local fallback:
@@ -62,7 +65,7 @@ Keep SQLite only for local fallback:
 Recommended Render service settings:
 
 ```text
-Root Directory: backend
+Root Directory: (leave empty if this repo is already the backend repo)
 Build Command: pip install -r requirements.txt
 Start Command: uvicorn app.main:app --host 0.0.0.0 --port $PORT
 Health Check Path: /api/v1/health

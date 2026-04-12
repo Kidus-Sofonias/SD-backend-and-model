@@ -1,11 +1,10 @@
 # File role: Shared core utilities for configuration, security, JWT handling, logging, and typed application errors.
 # Connects to: nearby package modules via local imports.
 # Key symbols/vars: Settings, settings.
-from typing import Annotated
 import json
 
-from pydantic import field_validator
-from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+from pydantic import computed_field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -18,14 +17,14 @@ class Settings(BaseSettings):
     port: int = 8000
 
     log_level: str = "INFO"
-    cors_origins: Annotated[list[str], NoDecode] = [
-        "http://localhost:8081",
-        "http://127.0.0.1:8081",
-        "http://localhost:19006",
-        "http://127.0.0.1:19006",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ]
+    cors_origins_raw: str = (
+        "http://localhost:8081,"
+        "http://127.0.0.1:8081,"
+        "http://localhost:19006,"
+        "http://127.0.0.1:19006,"
+        "http://localhost:3000,"
+        "http://127.0.0.1:3000"
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -51,18 +50,23 @@ class Settings(BaseSettings):
                 return True
         return value
 
-    @field_validator("cors_origins", mode="before")
+    @field_validator("cors_origins_raw", mode="before")
     @classmethod
     def normalize_cors_origins(cls, value):
         if isinstance(value, str):
-            stripped = value.strip()
-            if not stripped:
-                return []
-            if stripped.startswith("["):
-                parsed = json.loads(stripped)
-                if isinstance(parsed, list):
-                    return [str(item).strip() for item in parsed if str(item).strip()]
-            return [item.strip() for item in stripped.split(",") if item.strip()]
+            return value.strip()
         return value
+
+    @computed_field
+    @property
+    def cors_origins(self) -> list[str]:
+        stripped = self.cors_origins_raw.strip()
+        if not stripped:
+            return []
+        if stripped.startswith("["):
+            parsed = json.loads(stripped)
+            if isinstance(parsed, list):
+                return [str(item).strip() for item in parsed if str(item).strip()]
+        return [item.strip() for item in stripped.split(",") if item.strip()]
 
 settings = Settings()
