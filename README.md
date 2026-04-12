@@ -41,6 +41,33 @@ Health check:
 curl http://127.0.0.1:8000/api/v1/health
 ```
 
+## Render deployment notes
+
+This backend supports both PostgreSQL and SQLite.
+
+For Render production, use PostgreSQL and set `DATABASE_URL` in the Render service.
+
+Example:
+
+```text
+DATABASE_URL=postgresql://USERNAME:PASSWORD@HOST:5432/DATABASE_NAME
+```
+
+Keep SQLite only for local fallback:
+
+```text
+# DATABASE_URL=sqlite:///./sdbackend.db
+```
+
+Recommended Render service settings:
+
+```text
+Root Directory: backend
+Build Command: pip install -r requirements.txt
+Start Command: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+Health Check Path: /api/v1/health
+```
+
 ## Tests
 
 ```powershell
