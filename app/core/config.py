@@ -1,8 +1,11 @@
 # File role: Shared core utilities for configuration, security, JWT handling, logging, and typed application errors.
 # Connects to: nearby package modules via local imports.
 # Key symbols/vars: Settings, settings.
+from typing import Annotated
+import json
+
 from pydantic import field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -15,7 +18,7 @@ class Settings(BaseSettings):
     port: int = 8000
 
     log_level: str = "INFO"
-    cors_origins: list[str] = [
+    cors_origins: Annotated[list[str], NoDecode] = [
         "http://localhost:8081",
         "http://127.0.0.1:8081",
         "http://localhost:19006",
@@ -55,6 +58,10 @@ class Settings(BaseSettings):
             stripped = value.strip()
             if not stripped:
                 return []
+            if stripped.startswith("["):
+                parsed = json.loads(stripped)
+                if isinstance(parsed, list):
+                    return [str(item).strip() for item in parsed if str(item).strip()]
             return [item.strip() for item in stripped.split(",") if item.strip()]
         return value
 
