@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     admin_password: str = "admin123"
 
     database_url: str = "sqlite:///./sdbackend.db"
+    auto_retrain_enabled: bool = False
+    auto_retrain_trip_interval: int = 100
+    auto_retrain_skip_tests: bool = True
 
     @field_validator("debug", mode="before")
     @classmethod

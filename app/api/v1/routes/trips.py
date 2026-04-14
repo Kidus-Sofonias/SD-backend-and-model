@@ -24,7 +24,9 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user
 from app.db.models.trip import Trip
 from app.db.session import get_db
+from app.repositories.sensor_sample_repository import SensorSampleRepository
 from app.repositories.trip_repository import SqlTripRepository
+from app.schemas.admin import TripRouteOut
 from app.schemas.trip import (
     FinalizeTripOut,
     ReprocessTripsOut,
@@ -104,6 +106,38 @@ def get_trip_details(
         return service.get_trip_detail(actor=user, trip_id=trip_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/{trip_id}/route", response_model=TripRouteOut)
+def get_trip_route(
+    trip_id: str,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    repo = SqlTripRepository(db)
+    trip = repo.get_by_id(trip_id=trip_id, user_id=user.id)
+    if not trip:
+        raise HTTPException(status_code=404, detail="Trip not found")
+
+    sample_repo = SensorSampleRepository(db)
+    samples = sample_repo.list_route_points_by_trip(user_id=user.id, trip_id=trip_id)
+    points = [
+        {
+            "ts": sample.ts,
+            "lat": float(sample.lat),
+            "lon": float(sample.lon),
+            "speed_mps": sample.speed_mps,
+            "accuracy_m": sample.accuracy_m,
+        }
+        for sample in samples
+    ]
+
+    return TripRouteOut(
+        trip_id=trip.id,
+        driver_user_id=user.id,
+        point_count=len(points),
+        points=points,
+    )
 
 
 @router.get("/{trip_id}/summary", response_model=TripSummaryOut)

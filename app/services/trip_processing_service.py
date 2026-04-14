@@ -15,9 +15,11 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 
 from sqlalchemy import delete
+from sqlalchemy import func
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -27,6 +29,7 @@ from app.db.models.sensor_sample import SensorSample
 from app.db.models.trip import Trip
 from app.db.models.user import User
 from app.db.session import commit_with_retry
+from app.ml.auto_retrain import maybe_schedule_auto_retrain
 from app.ml.config import FeatureConfigV1
 from app.ml.event_generation import build_human_reasons, generate_trip_events
 from app.ml.inference import ModelScorer
@@ -34,6 +37,7 @@ from app.ml.pipeline import run_trip_pipeline
 from app.repositories.trip_repository import SqlTripRepository
 from app.repositories.user_repository import UserRecord
 
+logger = logging.getLogger(__name__)
 ML_CONFIDENCE_THRESHOLD = 0.5
 MEDIUM_CONFIDENCE_THRESHOLD = 0.8
 LOW_CONFIDENCE_REASON = "Low confidence trip data, used rules fallback"
@@ -87,6 +91,14 @@ class TripProcessingService:
             .order_by(SensorSample.ts.asc())
         )
         return self.db.execute(stmt).scalars().all()
+
+    def _count_completed_trips(self) -> int:
+        return int(
+            self.db.execute(
+                select(func.count()).select_from(Trip).where(Trip.status == "completed")
+            ).scalar_one()
+            or 0
+        )
 
     def _samples_to_payload(self, rows: list[SensorSample]) -> list[dict]:
         payload: list[dict] = []
@@ -622,6 +634,12 @@ class TripProcessingService:
         except Exception:
             self.db.rollback()
             raise
+
+        if not force_reprocess:
+            try:
+                maybe_schedule_auto_retrain(completed_trip_count=self._count_completed_trips())
+            except Exception:
+                logger.exception("Failed to schedule automatic retraining after trip finalization.")
 
         return self._build_response(trip, persisted_breakdown, already_processed=False)
 

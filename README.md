@@ -127,6 +127,16 @@ Tune risky-trip probability thresholds on reviewed trips:
 conda run -n safe-driving-backend python scripts/tune_risk_thresholds.py --thresholds 0.3 0.4 0.5 0.6 0.7
 ```
 
+Optional automatic retraining every N completed trips:
+
+```text
+AUTO_RETRAIN_ENABLED=true
+AUTO_RETRAIN_TRIP_INTERVAL=100
+AUTO_RETRAIN_SKIP_TESTS=true
+```
+
+When enabled, the backend queues a background `refresh_model_cycle.py` run after a trip is finalized and the total completed-trip count lands exactly on the configured interval (for example 100, 200, 300). The retrain trigger is best-effort and does not block the trip-finalization response.
+
 ## Data/versioning workflow
 
 Each finalized trip now stores:

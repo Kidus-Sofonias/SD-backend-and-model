@@ -47,3 +47,16 @@ class SensorSampleRepository:
             SensorSample.user_id == user_id,
         )
         return int(self.db.execute(stmt).scalar_one())
+
+    def list_route_points_by_trip(self, *, user_id: str, trip_id: str) -> list[SensorSample]:
+        stmt = (
+            select(SensorSample)
+            .where(
+                SensorSample.trip_id == trip_id,
+                SensorSample.user_id == user_id,
+                SensorSample.lat.is_not(None),
+                SensorSample.lon.is_not(None),
+            )
+            .order_by(SensorSample.ts.asc())
+        )
+        return list(self.db.execute(stmt).scalars().all())

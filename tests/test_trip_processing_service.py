@@ -19,6 +19,7 @@ from app.db.models.driving_event import DrivingEvent
 from app.db.models.sensor_sample import SensorSample
 from app.db.models.trip import Trip
 from app.db.models.user import User
+from app.ml.auto_retrain import milestone_for_completed_trips, should_request_auto_retrain
 from app.services.trip_processing_service import TripProcessingService
 
 
@@ -196,6 +197,23 @@ def test_finalize_trip_deletes_trip_when_samples_are_insufficient(tmp_path: Path
     assert events == []
 
 
+def test_finalize_trip_schedules_auto_retrain_after_successful_finalize(tmp_path: Path, monkeypatch) -> None:
+    db = _make_session(tmp_path)
+    user_id, trip_id = _seed_trip_with_samples(db, "risky_trip_240_samples_1.json")
+    service = TripProcessingService(db)
+    scheduled_counts: list[int] = []
+
+    monkeypatch.setattr(service, "_count_completed_trips", lambda: 100)
+    monkeypatch.setattr(
+        "app.services.trip_processing_service.maybe_schedule_auto_retrain",
+        lambda *, completed_trip_count: scheduled_counts.append(completed_trip_count) or True,
+    )
+
+    service.finalize_trip(user_id=user_id, trip_id=trip_id, delete_raw=False)
+
+    assert scheduled_counts == [100]
+
+
 def test_compute_final_score_blends_rule_score_with_ml_probability(tmp_path: Path) -> None:
     db = _make_session(tmp_path)
     service = TripProcessingService(db)
@@ -220,3 +238,27 @@ def test_compute_final_score_pulls_extreme_scores_toward_neutral_when_confidence
     assert low_score is not None
     assert 65 <= high_score < 100
     assert 20 < low_score <= 45
+
+
+def test_auto_retrain_milestone_only_matches_exact_interval() -> None:
+    assert milestone_for_completed_trips(completed_trip_count=99, trip_interval=100) is None
+    assert milestone_for_completed_trips(completed_trip_count=100, trip_interval=100) == 100
+    assert milestone_for_completed_trips(completed_trip_count=200, trip_interval=100) == 200
+
+
+def test_auto_retrain_request_guard_skips_duplicate_milestones() -> None:
+    assert should_request_auto_retrain(
+        completed_trip_count=100,
+        trip_interval=100,
+        last_requested_milestone=0,
+    ) is True
+    assert should_request_auto_retrain(
+        completed_trip_count=100,
+        trip_interval=100,
+        last_requested_milestone=100,
+    ) is False
+    assert should_request_auto_retrain(
+        completed_trip_count=200,
+        trip_interval=100,
+        last_requested_milestone=100,
+    ) is True
