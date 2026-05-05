@@ -65,7 +65,7 @@ def _ensure_driving_event_columns() -> None:
 
     with engine.begin() as connection:
         if "occurred_at" not in columns:
-            connection.execute(text("ALTER TABLE driving_events ADD COLUMN occurred_at DATETIME"))
+            connection.execute(text("ALTER TABLE driving_events ADD COLUMN occurred_at TIMESTAMP"))
         if "lat" not in columns:
             connection.execute(text("ALTER TABLE driving_events ADD COLUMN lat FLOAT"))
         if "lon" not in columns:
