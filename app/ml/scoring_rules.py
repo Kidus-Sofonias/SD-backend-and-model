@@ -30,7 +30,14 @@ def score_trip_rules_v1(
     jerk_penalty = w_jerk * _normalize(trip_features["p95_jerk"], 0.5, 6.0)
     speed_var_penalty = w_speed_var * _normalize(trip_features["speed_variance"], 0.0, 25.0)
 
-    brake_penalty = w_brake * trip_features["harsh_brake_count"]
+    emergency_brake_count = int(trip_features.get("emergency_brake_count", 0))
+    chargeable_brake_count = int(
+        trip_features.get(
+            "chargeable_hard_brake_count",
+            max(0, int(trip_features["harsh_brake_count"]) - emergency_brake_count),
+        )
+    )
+    brake_penalty = w_brake * chargeable_brake_count
     accel_penalty = w_accel * trip_features["harsh_accel_count"]
     turn_penalty = w_turn * trip_features["aggressive_turn_count"]
 
@@ -41,6 +48,7 @@ def score_trip_rules_v1(
         "score": score,
         "penalties": {
             "harsh_brake": brake_penalty,
+            "emergency_brake": 0.0,
             "harsh_accel": accel_penalty,
             "aggressive_turn": turn_penalty,
             "jerk": jerk_penalty,

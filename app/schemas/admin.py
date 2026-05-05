@@ -34,3 +34,40 @@ class TripRouteOut(BaseModel):
     driver_user_id: str
     point_count: int = 0
     points: list[TripRoutePointOut] = Field(default_factory=list)
+    snapped_points: list[TripRoutePointOut] = Field(default_factory=list)
+    snapped_source: str | None = None
+    snapped_status: str = "unavailable"
+
+
+class DriverTrendPointOut(BaseModel):
+    period_start: datetime
+    period_end: datetime
+    label: str
+    average_score: float | None = None
+    trip_count: int = 0
+    high_risk_trip_count: int = 0
+
+
+class DriverTrendSnapshotOut(BaseModel):
+    label: str
+    average_score: float | None = None
+    trip_count: int = 0
+    high_risk_trip_count: int = 0
+
+
+class DriverTrendWindowOut(BaseModel):
+    current: DriverTrendSnapshotOut
+    previous: DriverTrendSnapshotOut
+    delta_score: float | None = None
+    direction: str = "flat"
+    points: list[DriverTrendPointOut] = Field(default_factory=list)
+
+
+class DriverInsightsOut(BaseModel):
+    driver_id: str
+    driver_email: EmailStr
+    overall_average_score: float | None = None
+    scored_trip_count: int = 0
+    high_risk_trip_count: int = 0
+    weekly: DriverTrendWindowOut
+    monthly: DriverTrendWindowOut

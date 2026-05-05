@@ -46,6 +46,9 @@ def add_event(
         trip_id=trip_id,
         event_type=payload.event_type,
         value=payload.value,
+        occurred_at=payload.occurred_at,
+        lat=payload.lat,
+        lon=payload.lon,
     )
 
     return APIResponse.ok(

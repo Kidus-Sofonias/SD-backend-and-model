@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     auto_retrain_enabled: bool = False
     auto_retrain_trip_interval: int = 100
     auto_retrain_skip_tests: bool = True
+    route_snap_enabled: bool = True
+    route_snap_base_url: str = "https://router.project-osrm.org"
 
     @field_validator("debug", mode="before")
     @classmethod

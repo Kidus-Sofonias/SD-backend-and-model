@@ -10,6 +10,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from .braking import classify_brake_segment
+
 
 def compute_per_sample_features(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -95,10 +97,60 @@ def _count_events(
     return count
 
 
+def _event_segments(
+    mask: np.ndarray,
+    timestamps: np.ndarray,
+    min_duration_s: float,
+    merge_gap_s: float,
+) -> list[tuple[int, int]]:
+    """
+    Return sustained event index ranges from a boolean mask.
+    """
+    idx = np.where(mask)[0]
+    if len(idx) == 0:
+        return []
+
+    groups: list[tuple[int, int]] = []
+    start = idx[0]
+    prev = idx[0]
+
+    for i in idx[1:]:
+        if i == prev + 1:
+            prev = i
+        else:
+            groups.append((start, prev))
+            start = i
+            prev = i
+    groups.append((start, prev))
+
+    merged: list[list[int]] = []
+    for s, e in groups:
+        if not merged:
+            merged.append([s, e])
+            continue
+
+        prev_s, prev_e = merged[-1]
+        gap = timestamps[s] - timestamps[prev_e]
+        if gap <= merge_gap_s:
+            merged[-1][1] = e
+        else:
+            merged.append([s, e])
+
+    segments: list[tuple[int, int]] = []
+    for s, e in merged:
+        duration = timestamps[e] - timestamps[s]
+        if duration >= min_duration_s:
+            segments.append((s, e))
+
+    return segments
+
+
 def aggregate_trip_features(
     per: pd.DataFrame,
     harsh_brake_dv: float,
     harsh_accel_dv: float,
+    emergency_brake_dv: float,
+    emergency_brake_min_speed_mps: float,
     aggressive_turn_threshold: float,
     min_event_duration_s: float,
     merge_gap_s: float,
@@ -116,10 +168,30 @@ def aggregate_trip_features(
     harsh_brake_mask = per["dv"].to_numpy() < harsh_brake_dv
     harsh_accel_mask = per["dv"].to_numpy() > harsh_accel_dv
     aggressive_turn_mask = per["turn_intensity"].to_numpy() > aggressive_turn_threshold
-
-    harsh_brake_count = _count_events(harsh_brake_mask, t, min_event_duration_s, merge_gap_s)
+    harsh_brake_segments = _event_segments(
+        harsh_brake_mask,
+        t,
+        min_event_duration_s,
+        merge_gap_s,
+    )
+    harsh_brake_count = len(harsh_brake_segments)
     harsh_accel_count = _count_events(harsh_accel_mask, t, min_event_duration_s, merge_gap_s)
     aggressive_turn_count = _count_events(aggressive_turn_mask, t, min_event_duration_s, merge_gap_s)
+
+    emergency_brake_count = sum(
+        1
+        for start, end in harsh_brake_segments
+        if classify_brake_segment(
+            per["dv"].to_numpy(),
+            speed,
+            start,
+            end,
+            emergency_brake_dv=emergency_brake_dv,
+            emergency_brake_min_speed_mps=emergency_brake_min_speed_mps,
+        )
+        == "emergency_brake"
+    )
+    chargeable_hard_brake_count = max(0, harsh_brake_count - emergency_brake_count)
 
     duration_s = float(t[-1] - t[0]) if len(t) >= 2 else 0.0
     positive_dt = dt[dt > 0]
@@ -148,6 +220,8 @@ def aggregate_trip_features(
         "p95_jerk": float(np.percentile(per["jerk_mag"], 95)),
         "max_jerk": float(np.max(per["jerk_mag"])),
         "harsh_brake_count": harsh_brake_count,
+        "emergency_brake_count": int(min(harsh_brake_count, emergency_brake_count)),
+        "chargeable_hard_brake_count": int(chargeable_hard_brake_count),
         "harsh_accel_count": harsh_accel_count,
         "aggressive_turn_count": aggressive_turn_count,
         "confidence": confidence,

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import delete
 from sqlalchemy import select
@@ -16,6 +17,7 @@ from app.db.models.sensor_sample import SensorSample
 from app.db.models.trip import Trip
 from app.db.session import commit_with_retry
 from app.repositories.user_repository import DriverRecord, SqlUserRepository, UserRecord
+from app.services.route_snap_service import RouteSnapService
 
 
 class AdminService:
@@ -27,9 +29,110 @@ class AdminService:
         if not actor.is_admin:
             raise ForbiddenError(message_key="auth.forbidden")
 
+    def _as_utc_timestamp(self, ts):
+        if ts is None:
+            return ts
+        if ts.tzinfo is None:
+            return ts.replace(tzinfo=timezone.utc)
+        return ts.astimezone(timezone.utc)
+
     def list_drivers(self, actor: UserRecord) -> list[DriverRecord]:
         self._require_admin(actor)
         return self.users.list_drivers()
+
+    def _trip_anchor_timestamp(self, trip: Trip) -> datetime:
+        candidate = trip.processed_at or trip.ended_at or trip.started_at
+        if candidate.tzinfo is None:
+            return candidate.replace(tzinfo=timezone.utc)
+        return candidate.astimezone(timezone.utc)
+
+    def _week_start(self, dt: datetime) -> datetime:
+        midnight = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        return midnight - timedelta(days=midnight.weekday())
+
+    def _month_start(self, dt: datetime) -> datetime:
+        return dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    def _add_months(self, dt: datetime, months: int) -> datetime:
+        year = dt.year + ((dt.month - 1 + months) // 12)
+        month = ((dt.month - 1 + months) % 12) + 1
+        return dt.replace(year=year, month=month, day=1)
+
+    def _empty_snapshot(self, label: str) -> dict:
+        return {
+            "label": label,
+            "average_score": None,
+            "trip_count": 0,
+            "high_risk_trip_count": 0,
+        }
+
+    def _snapshot_from_point(self, point: dict) -> dict:
+        return {
+            "label": point["label"],
+            "average_score": point["average_score"],
+            "trip_count": point["trip_count"],
+            "high_risk_trip_count": point["high_risk_trip_count"],
+        }
+
+    def _direction_for_delta(self, delta_score: float | None) -> str:
+        if delta_score is None or abs(delta_score) < 0.05:
+            return "flat"
+        return "up" if delta_score > 0 else "down"
+
+    def _build_trend_window(
+        self,
+        *,
+        trips: list[Trip],
+        periods: int,
+        period_start_fn,
+        next_period_fn,
+        label_fn,
+    ) -> dict:
+        now = datetime.now(timezone.utc)
+        current_start = period_start_fn(now)
+        starts = [current_start]
+        while len(starts) < periods:
+            starts.insert(0, next_period_fn(starts[0], -1))
+
+        buckets: dict[datetime, list[Trip]] = {start: [] for start in starts}
+        for trip in trips:
+            start = period_start_fn(self._trip_anchor_timestamp(trip))
+            if start in buckets:
+                buckets[start].append(trip)
+
+        points: list[dict] = []
+        for start in starts:
+            trip_bucket = buckets[start]
+            period_end = next_period_fn(start, 1) - timedelta(microseconds=1)
+            avg_score = None
+            if trip_bucket:
+                avg_score = round(sum(int(trip.score or 0) for trip in trip_bucket) / len(trip_bucket), 1)
+            points.append(
+                {
+                    "period_start": start,
+                    "period_end": period_end,
+                    "label": label_fn(start),
+                    "average_score": avg_score,
+                    "trip_count": len(trip_bucket),
+                    "high_risk_trip_count": sum(1 for trip in trip_bucket if trip.risk_level == "high"),
+                }
+            )
+
+        current_point = points[-1]
+        previous_point = points[-2] if len(points) > 1 else None
+        current_snapshot = self._snapshot_from_point(current_point)
+        previous_snapshot = self._snapshot_from_point(previous_point) if previous_point else self._empty_snapshot("Previous")
+        delta_score = None
+        if current_snapshot["average_score"] is not None and previous_snapshot["average_score"] is not None:
+            delta_score = round(float(current_snapshot["average_score"]) - float(previous_snapshot["average_score"]), 1)
+
+        return {
+            "current": current_snapshot,
+            "previous": previous_snapshot,
+            "delta_score": delta_score,
+            "direction": self._direction_for_delta(delta_score),
+            "points": points,
+        }
 
     def _is_not_enough_samples(self, raw_breakdown: str | None) -> bool:
         if not raw_breakdown:
@@ -88,6 +191,52 @@ class AdminService:
         stmt = select(Trip).where(Trip.user_id == driver_id).order_by(Trip.started_at.desc())
         return self.db.execute(stmt).scalars().all()
 
+    def get_driver_insights(self, actor: UserRecord, driver_id: str) -> dict:
+        self._require_admin(actor)
+        driver = self.users.get_driver_by_id(driver_id)
+        if driver is None:
+            raise NotFoundError(message_key="admin.driver_not_found")
+
+        self._cleanup_failed_insufficient_trips(driver_id)
+
+        trips = self.db.execute(
+            select(Trip)
+            .where(
+                Trip.user_id == driver_id,
+                Trip.score.is_not(None),
+            )
+            .order_by(Trip.started_at.asc())
+        ).scalars().all()
+
+        overall_average_score = None
+        if trips:
+            overall_average_score = round(sum(int(trip.score or 0) for trip in trips) / len(trips), 1)
+
+        weekly = self._build_trend_window(
+            trips=trips,
+            periods=8,
+            period_start_fn=self._week_start,
+            next_period_fn=lambda start, step: start + timedelta(weeks=step),
+            label_fn=lambda start: start.strftime("%b %d"),
+        )
+        monthly = self._build_trend_window(
+            trips=trips,
+            periods=6,
+            period_start_fn=self._month_start,
+            next_period_fn=self._add_months,
+            label_fn=lambda start: start.strftime("%b %Y"),
+        )
+
+        return {
+            "driver_id": driver.id,
+            "driver_email": driver.email,
+            "overall_average_score": overall_average_score,
+            "scored_trip_count": len(trips),
+            "high_risk_trip_count": sum(1 for trip in trips if trip.risk_level == "high"),
+            "weekly": weekly,
+            "monthly": monthly,
+        }
+
     def get_driver_trip_route(self, actor: UserRecord, driver_id: str, trip_id: str) -> dict:
         self._require_admin(actor)
         driver = self.users.get_driver_by_id(driver_id)
@@ -116,7 +265,7 @@ class AdminService:
 
         points = [
             {
-                "ts": sample.ts,
+                "ts": self._as_utc_timestamp(sample.ts),
                 "lat": float(sample.lat),
                 "lon": float(sample.lon),
                 "speed_mps": sample.speed_mps,
@@ -124,12 +273,16 @@ class AdminService:
             }
             for sample in samples
         ]
+        snap_result = RouteSnapService().snap(points)
 
         return {
             "trip_id": trip.id,
             "driver_user_id": driver_id,
             "point_count": len(points),
             "points": points,
+            "snapped_points": snap_result.snapped_points,
+            "snapped_source": snap_result.source,
+            "snapped_status": snap_result.status,
         }
 
     def update_driver_credentials(

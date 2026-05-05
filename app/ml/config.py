@@ -9,6 +9,7 @@ class FeatureConfigV1:
     # data handling
     max_gap_s: float = 3.0
     ema_alpha: float = 0.25
+    min_samples_for_scoring: int = 3
 
     # IMPORTANT: your app currently sends speed in km/h
     input_speed_unit: str = "kmh"
@@ -16,6 +17,8 @@ class FeatureConfigV1:
     # thresholds in m/s^2
     harsh_brake_dv: float = -3.0
     harsh_accel_dv: float = 3.0
+    emergency_brake_dv: float = -5.5
+    emergency_brake_min_speed_mps: float = 8.0
 
     min_event_duration_s: float = 0.30
     merge_gap_s: float = 0.20

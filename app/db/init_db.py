@@ -59,7 +59,21 @@ def _seed_default_admin() -> None:
         db.close()
 
 
+def _ensure_driving_event_columns() -> None:
+    inspector = inspect(engine)
+    columns = {column["name"] for column in inspector.get_columns("driving_events")}
+
+    with engine.begin() as connection:
+        if "occurred_at" not in columns:
+            connection.execute(text("ALTER TABLE driving_events ADD COLUMN occurred_at DATETIME"))
+        if "lat" not in columns:
+            connection.execute(text("ALTER TABLE driving_events ADD COLUMN lat FLOAT"))
+        if "lon" not in columns:
+            connection.execute(text("ALTER TABLE driving_events ADD COLUMN lon FLOAT"))
+
+
 def init_db() -> None:
     Base.metadata.create_all(bind=engine)
     _ensure_user_role_column()
+    _ensure_driving_event_columns()
     _seed_default_admin()

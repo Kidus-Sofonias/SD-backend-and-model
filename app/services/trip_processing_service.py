@@ -31,7 +31,7 @@ from app.db.models.user import User
 from app.db.session import commit_with_retry
 from app.ml.auto_retrain import maybe_schedule_auto_retrain
 from app.ml.config import FeatureConfigV1
-from app.ml.event_generation import build_human_reasons, generate_trip_events
+from app.ml.event_generation import build_human_reasons
 from app.ml.inference import ModelScorer
 from app.ml.pipeline import run_trip_pipeline
 from app.repositories.trip_repository import SqlTripRepository
@@ -50,6 +50,7 @@ NEUTRAL_SCORE = 60
 class TripProcessingService:
     GENERATED_EVENT_TYPES = {
         "hard_brake",
+        "emergency_brake",
         "hard_accel",
         "aggressive_turn",
         "unstable_motion",
@@ -241,9 +242,15 @@ class TripProcessingService:
                 "trip_id": ev.trip_id,
                 "event_type": ev.event_type,
                 "value": float(ev.value),
+                "occurred_at": ev.occurred_at,
+                "lat": ev.lat,
+                "lon": ev.lon,
                 "created_at": ev.created_at,
             }
-            for ev in sorted(trip.events, key=lambda item: item.created_at)
+            for ev in sorted(
+                trip.events,
+                key=lambda item: ((item.occurred_at or item.created_at), item.id),
+            )
         ]
 
     def _generated_event_payloads(self, trip: Trip) -> list[dict]:
@@ -535,6 +542,7 @@ class TripProcessingService:
         rule_breakdown = pipeline_result["breakdown"]
         feature_version = pipeline_result["feature_version"]
         confidence = pipeline_result["confidence"]
+        generated_events = pipeline_result.get("event_instances", [])
 
         if self._is_not_enough_samples(rule_breakdown):
             try:
@@ -575,7 +583,6 @@ class TripProcessingService:
         risk_probability = self._risk_probability_from_score(final_score, ml_risk_probability)
         risk_level = self._risk_level_from_score(final_score)
 
-        generated_events = generate_trip_events(trip_features)
         human_reasons = build_human_reasons(
             trip_features=trip_features,
             ml_prediction=ml_prediction,
@@ -663,10 +670,17 @@ class TripProcessingService:
             self.db.delete(ev)
 
         for item in generated_events:
+            occurred_at_raw = item.get("occurred_at")
+            occurred_at = None
+            if occurred_at_raw:
+                occurred_at = datetime.fromisoformat(str(occurred_at_raw).replace("Z", "+00:00"))
             ev = DrivingEvent(
                 user_id=user_id,
                 trip_id=trip_id,
                 event_type=item["event_type"],
                 value=float(item["value"]),
+                occurred_at=occurred_at,
+                lat=item.get("lat"),
+                lon=item.get("lon"),
             )
             self.db.add(ev)

@@ -134,6 +134,8 @@ def test_finalize_trip_persists_score_breakdown_and_generated_events(tmp_path: P
 
     generated_events = db.execute(select(DrivingEvent).where(DrivingEvent.trip_id == trip_id)).scalars().all()
     assert len(generated_events) == result["events_generated"]
+    assert any(event.occurred_at is not None for event in generated_events)
+    assert any(event.lat is not None and event.lon is not None for event in generated_events)
 
 
 def test_finalize_trip_with_delete_raw_removes_sensor_rows(tmp_path: Path) -> None:
@@ -195,6 +197,20 @@ def test_finalize_trip_deletes_trip_when_samples_are_insufficient(tmp_path: Path
     assert trip is None
     assert samples == []
     assert events == []
+
+
+def test_finalize_trip_scores_trip_at_lowered_minimum_sample_threshold(tmp_path: Path) -> None:
+    db = _make_session(tmp_path)
+    user_id, trip_id = _seed_trip_with_too_few_samples(db, sample_count=3)
+
+    result = TripProcessingService(db).finalize_trip(user_id=user_id, trip_id=trip_id, delete_raw=False)
+
+    assert result["score"] is not None
+    assert result["breakdown"].get("error") != "not_enough_samples"
+
+    trip = db.execute(select(Trip).where(Trip.id == trip_id)).scalar_one_or_none()
+    assert trip is not None
+    assert trip.processed_at is not None
 
 
 def test_finalize_trip_schedules_auto_retrain_after_successful_finalize(tmp_path: Path, monkeypatch) -> None:

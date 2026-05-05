@@ -18,13 +18,23 @@ class DrivingEventRepository:
         self.db = db
 
     def create(
-        self, user_id: str, trip_id: str, event_type: str, value: float
+        self,
+        user_id: str,
+        trip_id: str,
+        event_type: str,
+        value: float,
+        occurred_at: datetime | None = None,
+        lat: float | None = None,
+        lon: float | None = None,
     ) -> DrivingEvent:
         event = DrivingEvent(
             user_id=user_id,
             trip_id=trip_id,
             event_type=event_type,
             value=value,
+            occurred_at=occurred_at,
+            lat=lat,
+            lon=lon,
         )
         self.db.add(event)
         commit_with_retry(self.db)
@@ -35,7 +45,7 @@ class DrivingEventRepository:
         stmt = (
             select(DrivingEvent)
             .where(DrivingEvent.trip_id == trip_id, DrivingEvent.user_id == user_id)
-            .order_by(DrivingEvent.created_at.asc())
+            .order_by(func.coalesce(DrivingEvent.occurred_at, DrivingEvent.created_at).asc(), DrivingEvent.id.asc())
         )
         return list(self.db.execute(stmt).scalars().all())
 
@@ -59,13 +69,15 @@ class DrivingEventRepository:
             stmt = stmt.where(DrivingEvent.trip_id == trip_id)
             count_stmt = count_stmt.where(DrivingEvent.trip_id == trip_id)
         if start is not None:
-            stmt = stmt.where(DrivingEvent.created_at >= start)
-            count_stmt = count_stmt.where(DrivingEvent.created_at >= start)
+            effective_ts = func.coalesce(DrivingEvent.occurred_at, DrivingEvent.created_at)
+            stmt = stmt.where(effective_ts >= start)
+            count_stmt = count_stmt.where(effective_ts >= start)
         if end is not None:
-            stmt = stmt.where(DrivingEvent.created_at <= end)
-            count_stmt = count_stmt.where(DrivingEvent.created_at <= end)
+            effective_ts = func.coalesce(DrivingEvent.occurred_at, DrivingEvent.created_at)
+            stmt = stmt.where(effective_ts <= end)
+            count_stmt = count_stmt.where(effective_ts <= end)
 
-        stmt = stmt.order_by(DrivingEvent.created_at.desc()).limit(limit).offset(offset)
+        stmt = stmt.order_by(func.coalesce(DrivingEvent.occurred_at, DrivingEvent.created_at).desc()).limit(limit).offset(offset)
 
         total = int(self.db.execute(count_stmt).scalar_one())
         rows = list(self.db.execute(stmt).scalars().all())

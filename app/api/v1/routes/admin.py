@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user, get_users_repo
 from app.db.session import get_db
 from app.repositories.user_repository import SqlUserRepository
-from app.schemas.admin import AdminUpdateDriverIn, DriverSummaryOut, TripRouteOut
+from app.schemas.admin import AdminUpdateDriverIn, DriverInsightsOut, DriverSummaryOut, TripRouteOut
 from app.schemas.trip import TripOut
 from app.services.admin_service import AdminService
 
@@ -35,6 +35,17 @@ def list_driver_trips(
 ):
     service = AdminService(db, users)
     return service.get_driver_trips(actor=user, driver_id=driver_id)
+
+
+@router.get("/drivers/{driver_id}/insights", response_model=DriverInsightsOut)
+def get_driver_insights(
+    driver_id: str,
+    db: Session = Depends(get_db),
+    users: SqlUserRepository = Depends(get_users_repo),
+    user=Depends(get_current_user),
+):
+    service = AdminService(db, users)
+    return service.get_driver_insights(actor=user, driver_id=driver_id)
 
 
 @router.get("/drivers/{driver_id}/trips/{trip_id}/route", response_model=TripRouteOut)

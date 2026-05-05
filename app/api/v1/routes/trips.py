@@ -17,6 +17,8 @@
 
 from __future__ import annotations
 
+from datetime import timezone
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -38,8 +40,17 @@ from app.schemas.trip import (
     TripSummaryOut,
 )
 from app.services.trip_processing_service import TripProcessingService
+from app.services.route_snap_service import RouteSnapService
 
 router = APIRouter(prefix="/trips", tags=["trips"])
+
+
+def _as_utc_timestamp(ts):
+    if ts is None:
+        return ts
+    if ts.tzinfo is None:
+        return ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(timezone.utc)
 
 
 @router.get("/active", response_model=TripOut | None)
@@ -123,7 +134,7 @@ def get_trip_route(
     samples = sample_repo.list_route_points_by_trip(user_id=user.id, trip_id=trip_id)
     points = [
         {
-            "ts": sample.ts,
+            "ts": _as_utc_timestamp(sample.ts),
             "lat": float(sample.lat),
             "lon": float(sample.lon),
             "speed_mps": sample.speed_mps,
@@ -131,12 +142,16 @@ def get_trip_route(
         }
         for sample in samples
     ]
+    snap_result = RouteSnapService().snap(points)
 
     return TripRouteOut(
         trip_id=trip.id,
         driver_user_id=user.id,
         point_count=len(points),
         points=points,
+        snapped_points=snap_result.snapped_points,
+        snapped_source=snap_result.source,
+        snapped_status=snap_result.status,
     )
 
 

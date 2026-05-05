@@ -10,6 +10,9 @@ from pydantic import BaseModel, ConfigDict, Field
 class DrivingEventCreate(BaseModel):
     event_type: str = Field(..., min_length=1, max_length=50)
     value: float
+    occurred_at: datetime | None = None
+    lat: float | None = None
+    lon: float | None = None
 
 
 class DrivingEventOut(BaseModel):
@@ -19,6 +22,9 @@ class DrivingEventOut(BaseModel):
     trip_id: str
     event_type: str
     value: float
+    occurred_at: datetime | None = None
+    lat: float | None = None
+    lon: float | None = None
     created_at: datetime
 
 class DrivingEventListResponse(BaseModel):

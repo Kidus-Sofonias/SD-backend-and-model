@@ -16,7 +16,16 @@ class DrivingEventService:
         self.repo = repo
         self.trip_repo = trip_repo
 
-    def add_event(self, user_id: str, trip_id: str, event_type: str, value: float):
+    def add_event(
+        self,
+        user_id: str,
+        trip_id: str,
+        event_type: str,
+        value: float,
+        occurred_at: datetime | None = None,
+        lat: float | None = None,
+        lon: float | None = None,
+    ):
         # validate trip belongs to user (prevents cheating)
         _trip = self.trip_repo.get_by_id(trip_id=trip_id, user_id=user_id)
         # create event
@@ -25,6 +34,9 @@ class DrivingEventService:
             trip_id=trip_id,
             event_type=event_type,
             value=value,
+            occurred_at=occurred_at,
+            lat=lat,
+            lon=lon,
         )
 
     def list_for_trip(self, *, user_id: str, trip_id: str):

@@ -235,6 +235,39 @@ def test_trip_api_deletes_trip_when_samples_are_insufficient(tmp_path: Path) -> 
         app.dependency_overrides.clear()
 
 
+def test_trip_api_can_reprocess_finalized_trip(tmp_path: Path) -> None:
+    session_factory = _make_session_factory(tmp_path)
+    user = UserRecord(id=str(uuid.uuid4()), email="reprocess@example.com", password_hash="hashed")
+
+    with session_factory() as db:
+        db.add(User(id=user.id, email=user.email, password_hash=user.password_hash))
+        db.commit()
+
+    client = _client_with_overrides(session_factory, user)
+    samples = _load_samples()
+
+    try:
+        trip_id = client.post("/api/v1/trips/start").json()["id"]
+        client.post(f"/api/v1/trips/{trip_id}/samples", json={"samples": samples})
+        client.post(f"/api/v1/trips/{trip_id}/end")
+
+        first_finalize = client.post(f"/api/v1/trips/{trip_id}/finalize")
+        assert first_finalize.status_code == 200
+        first_payload = first_finalize.json()
+
+        reprocess_res = client.post(f"/api/v1/trips/{trip_id}/reprocess")
+        assert reprocess_res.status_code == 200
+        reprocess_payload = reprocess_res.json()
+
+        assert reprocess_payload["trip_id"] == trip_id
+        assert reprocess_payload["already_processed"] is False
+        assert reprocess_payload["score"] == first_payload["score"]
+        assert reprocess_payload["processing_timestamp"] is not None
+    finally:
+        client.close()
+        app.dependency_overrides.clear()
+
+
 def test_admin_review_dashboard_can_see_other_drivers(tmp_path: Path) -> None:
     session_factory = _make_session_factory(tmp_path)
     driver = UserRecord(id=str(uuid.uuid4()), email="driver@example.com", password_hash="hashed")
@@ -380,6 +413,72 @@ def test_admin_can_fetch_driver_trip_route_points(tmp_path: Path) -> None:
         assert payload["points"][0]["ts"] == samples[0]["timestamp"]
     finally:
         admin_client.close()
+        app.dependency_overrides.clear()
+
+
+def test_admin_can_fetch_driver_weekly_and_monthly_trends(tmp_path: Path) -> None:
+    session_factory = _make_session_factory(tmp_path)
+    driver = UserRecord(id=str(uuid.uuid4()), email="driver-trends@example.com", password_hash="hashed")
+    admin = UserRecord(id=str(uuid.uuid4()), email="admin-trends@sdb.com", password_hash="hashed", role="admin")
+    now = datetime.now(timezone.utc)
+
+    with session_factory() as db:
+        db.add(User(id=driver.id, email=driver.email, password_hash=driver.password_hash, role=driver.role))
+        db.add(User(id=admin.id, email=admin.email, password_hash=admin.password_hash, role=admin.role))
+        trips = [
+            Trip(
+                id=str(uuid.uuid4()),
+                user_id=driver.id,
+                started_at=now - timedelta(days=2),
+                ended_at=now - timedelta(days=2),
+                processed_at=now - timedelta(days=2),
+                status="completed",
+                score=84,
+                risk_level="low",
+            ),
+            Trip(
+                id=str(uuid.uuid4()),
+                user_id=driver.id,
+                started_at=now - timedelta(days=10),
+                ended_at=now - timedelta(days=10),
+                processed_at=now - timedelta(days=10),
+                status="completed",
+                score=68,
+                risk_level="medium",
+            ),
+            Trip(
+                id=str(uuid.uuid4()),
+                user_id=driver.id,
+                started_at=now - timedelta(days=38),
+                ended_at=now - timedelta(days=38),
+                processed_at=now - timedelta(days=38),
+                status="completed",
+                score=52,
+                risk_level="high",
+            ),
+        ]
+        db.add_all(trips)
+        db.commit()
+
+    client = _client_with_overrides(session_factory, admin)
+    try:
+        insights_res = client.get(f"/api/v1/admin/drivers/{driver.id}/insights")
+        assert insights_res.status_code == 200
+        payload = insights_res.json()
+
+        assert payload["driver_id"] == driver.id
+        assert payload["driver_email"] == driver.email
+        assert payload["scored_trip_count"] == 3
+        assert payload["high_risk_trip_count"] == 1
+        assert payload["overall_average_score"] == 68.0
+        assert len(payload["weekly"]["points"]) == 8
+        assert len(payload["monthly"]["points"]) == 6
+        assert payload["weekly"]["current"]["trip_count"] >= 1
+        assert payload["weekly"]["current"]["average_score"] is not None
+        assert payload["monthly"]["current"]["label"]
+        assert payload["monthly"]["direction"] in {"up", "down", "flat"}
+    finally:
+        client.close()
         app.dependency_overrides.clear()
 
 
