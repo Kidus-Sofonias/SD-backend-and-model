@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 from collections.abc import Generator
+import socket
 import sqlite3
 import time
+from urllib.parse import urlparse, urlunparse
 
 from sqlalchemy import create_engine, inspect as sa_inspect
 from sqlalchemy import event
@@ -21,7 +23,44 @@ if settings.database_url.startswith("sqlite"):
         "timeout": 30,
     }
 
-engine = create_engine(settings.database_url, connect_args=connect_args)
+
+def _resolve_ipv4(url: str) -> str:
+    """Resolve a PostgreSQL hostname to an IPv4 address to avoid IPv6 routing issues (e.g., on Render)."""
+    if not url.startswith("postgresql"):
+        return url
+    parsed = urlparse(url)
+    hostname = parsed.hostname
+    if not hostname:
+        return url
+    try:
+        addrs = socket.getaddrinfo(hostname, None, socket.AF_INET)
+        if addrs:
+            ipv4 = addrs[0][4][0]
+            if ipv4 == hostname:
+                return url
+            # Reconstruct the netloc safely to avoid mangling credentials that might
+            # contain the hostname as a substring.
+            userinfo = ""
+            if parsed.username:
+                userinfo = parsed.username
+                if parsed.password:
+                    userinfo += ":" + parsed.password
+                userinfo += "@"
+            port_part = f":{parsed.port}" if parsed.port else ""
+            new_netloc = f"{userinfo}{ipv4}{port_part}"
+            url = urlunparse(parsed._replace(netloc=new_netloc))
+    except socket.gaierror:
+        pass
+    return url
+
+
+_database_url = _resolve_ipv4(settings.database_url)
+
+if _database_url.startswith("postgresql"):
+    connect_args.setdefault("sslmode", "require")
+    connect_args.setdefault("connect_timeout", 10)
+
+engine = create_engine(_database_url, connect_args=connect_args)
 
 if settings.database_url.startswith("sqlite"):
     @event.listens_for(engine, "connect")
