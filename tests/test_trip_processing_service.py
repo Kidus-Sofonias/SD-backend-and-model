@@ -71,7 +71,7 @@ def _seed_trip_with_samples(db: Session, dataset_name: str) -> tuple[str, str]:
     return user_id, trip_id
 
 
-def _seed_trip_with_too_few_samples(db: Session, sample_count: int = 2) -> tuple[str, str]:
+def _seed_trip_with_too_few_samples(db: Session, sample_count: int = 1) -> tuple[str, str]:
     user_id = str(uuid.uuid4())
     trip_id = str(uuid.uuid4())
     base_ts = datetime(2026, 3, 24, 11, 6, 0, tzinfo=timezone.utc)
@@ -182,7 +182,7 @@ def test_finalize_trip_falls_back_to_rules_when_model_prediction_fails(tmp_path:
 
 def test_finalize_trip_deletes_trip_when_samples_are_insufficient(tmp_path: Path) -> None:
     db = _make_session(tmp_path)
-    user_id, trip_id = _seed_trip_with_too_few_samples(db, sample_count=2)
+    user_id, trip_id = _seed_trip_with_too_few_samples(db, sample_count=1)
 
     result = TripProcessingService(db).finalize_trip(user_id=user_id, trip_id=trip_id, delete_raw=False)
 

@@ -17,13 +17,12 @@
 
 from __future__ import annotations
 
-from datetime import timezone
-
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
+from app.core.utils import as_utc_timestamp
 from app.db.models.trip import Trip
 from app.db.session import get_db
 from app.repositories.sensor_sample_repository import SensorSampleRepository
@@ -37,20 +36,11 @@ from app.schemas.trip import (
     TripReviewDashboardItemOut,
     TripReviewLabelIn,
     TripReviewOut,
-    TripSummaryOut,
 )
 from app.services.trip_processing_service import TripProcessingService
 from app.services.route_snap_service import RouteSnapService
 
 router = APIRouter(prefix="/trips", tags=["trips"])
-
-
-def _as_utc_timestamp(ts):
-    if ts is None:
-        return ts
-    if ts.tzinfo is None:
-        return ts.replace(tzinfo=timezone.utc)
-    return ts.astimezone(timezone.utc)
 
 
 @router.get("/active", response_model=TripOut | None)
@@ -134,7 +124,7 @@ def get_trip_route(
     samples = sample_repo.list_route_points_by_trip(user_id=user.id, trip_id=trip_id)
     points = [
         {
-            "ts": _as_utc_timestamp(sample.ts),
+            "ts": as_utc_timestamp(sample.ts),
             "lat": float(sample.lat),
             "lon": float(sample.lon),
             "speed_mps": sample.speed_mps,
@@ -155,39 +145,14 @@ def get_trip_route(
     )
 
 
-@router.get("/{trip_id}/summary", response_model=TripSummaryOut)
+@router.get("/{trip_id}/summary", response_model=TripDetailOut)
 def trip_summary(
     trip_id: str,
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
-    repo = SqlTripRepository(db)
-    trip = repo.get_by_id(trip_id=trip_id, user_id=user.id)
-    if not trip:
-        raise HTTPException(status_code=404, detail="Trip not found")
-
-    counts: dict[str, int] = {}
-    for ev in trip.events:
-        counts[ev.event_type] = counts.get(ev.event_type, 0) + 1
-
-    total = len(trip.events)
-
-    penalties = 0
-    penalties += counts.get("speeding", 0) * 5
-    penalties += counts.get("hard_brake", 0) * 3
-    penalties += counts.get("phone_use", 0) * 8
-
-    score = max(0, 100 - penalties)
-
-    return TripSummaryOut(
-        trip_id=trip.id,
-        status=trip.status,
-        started_at=trip.started_at,
-        ended_at=trip.ended_at,
-        total_events=total,
-        counts=counts,
-        score=score,
-    )
+    service = TripProcessingService(db)
+    return service.get_trip_detail(actor=user, trip_id=trip_id)
 
 
 @router.post("/{trip_id}/finalize", response_model=FinalizeTripOut)

@@ -1,9 +1,11 @@
 # File role: Shared core utilities for configuration, security, JWT handling, logging, and typed application errors.
 # Connects to: nearby package modules via local imports.
 # Key symbols/vars: Settings, settings.
+import hashlib
 import json
+import uuid
 
-from pydantic import computed_field, field_validator
+from pydantic import computed_field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -30,12 +32,16 @@ class Settings(BaseSettings):
         env_file=".env",
         env_prefix="",
         case_sensitive=False,
+        extra="ignore",
     )
-    # Auth / Security
-    secret_key: str = "WkJKHgQU7u_FxeQpG2HYv95v-LUCE1rwayUomwq75vrXii-bOV1zB-9A07rsu0E0WQoFS3r7TdRukx9Kl5yI2w"
+
+    # Auth / Security — NO HARDCODED DEFAULTS. Must be set via .env or environment variables.
+    # Set SECRET_KEY to a strong random value in production.
+    # Set ADMIN_PASSWORD to a strong password.
+    secret_key: str = ""
     access_token_expire_minutes: int = 60
     admin_email: str = "admin@sdb.com"
-    admin_password: str = "admin123"
+    admin_password: str = ""
 
     database_url: str = "sqlite:///./sdbackend.db"
     auto_retrain_enabled: bool = False
@@ -43,6 +49,29 @@ class Settings(BaseSettings):
     auto_retrain_skip_tests: bool = True
     route_snap_enabled: bool = True
     route_snap_base_url: str = "https://router.project-osrm.org"
+
+    @model_validator(mode="after")
+    def _ensure_secrets_in_production(self) -> "Settings":
+        env = self.app_env.strip().lower()
+        # Only require secrets in non-local, non-test environments
+        is_development = env in {"", "local", "dev", "development", "test"}
+        if is_development:
+            # Auto-generate a secret key for local development if not provided
+            if not self.secret_key:
+                self.secret_key = hashlib.sha256(uuid.uuid4().bytes).hexdigest()
+            return self
+
+        if not self.secret_key:
+            raise ValueError(
+                "SECRET_KEY is required in production. "
+                "Set it in the .env file or as an environment variable."
+            )
+        if not self.admin_password:
+            raise ValueError(
+                "ADMIN_PASSWORD is required in production. "
+                "Set it in the .env file or as an environment variable."
+            )
+        return self
 
     @field_validator("debug", mode="before")
     @classmethod

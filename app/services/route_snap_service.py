@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -22,6 +23,10 @@ class RouteSnapResult:
     snapped_points: list[dict]
     source: str | None
     status: str
+
+
+OSRM_RETRY_COUNT = 2
+OSRM_TIMEOUT = 12.0
 
 
 class RouteSnapService:
@@ -49,6 +54,20 @@ class RouteSnapService:
 
         return RouteSnapResult(snapped_points=[], source=None, status="unavailable")
 
+    def _fetch_with_retry(self, url: str, params: dict) -> dict | None:
+        """Fetch a URL with retry and exponential backoff."""
+        for attempt in range(OSRM_RETRY_COUNT + 1):
+            try:
+                with httpx.Client(timeout=OSRM_TIMEOUT) as client:
+                    response = client.get(url, params=params)
+                    response.raise_for_status()
+                    return response.json()
+            except Exception:
+                if attempt < OSRM_RETRY_COUNT:
+                    time.sleep((attempt + 1) * 1.0)
+                    continue
+                return None
+
     def _try_match(self, points: list[dict]) -> list[dict]:
         coordinates = ";".join(f"{point['lon']:.6f},{point['lat']:.6f}" for point in points)
         url = f"{self.base_url}/match/v1/driving/{coordinates}"
@@ -58,12 +77,8 @@ class RouteSnapService:
             "tidy": "true",
             "steps": "false",
         }
-        try:
-            with httpx.Client(timeout=8.0) as client:
-                response = client.get(url, params=params)
-                response.raise_for_status()
-                payload = response.json()
-        except Exception:
+        payload = self._fetch_with_retry(url, params)
+        if not payload:
             return []
 
         if payload.get("code") != "Ok":
@@ -83,12 +98,8 @@ class RouteSnapService:
             "steps": "false",
             "continue_straight": "true",
         }
-        try:
-            with httpx.Client(timeout=8.0) as client:
-                response = client.get(url, params=params)
-                response.raise_for_status()
-                payload = response.json()
-        except Exception:
+        payload = self._fetch_with_retry(url, params)
+        if not payload:
             return []
 
         if payload.get("code") != "Ok":

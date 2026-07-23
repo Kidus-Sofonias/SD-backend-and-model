@@ -35,7 +35,7 @@ from sqlalchemy import select
 from app.db.session import SessionLocal
 from app.db.models.trip import Trip
 from app.db.models.sensor_sample import SensorSample
-from app.ml.config import FeatureConfigV1
+from app.ml.config import FeatureConfigV2
 from app.ml.pipeline import run_trip_pipeline
 from app.ml.schemas import FEATURE_VERSION
 from scripts.reporting_utils import build_dataset_summary
@@ -164,7 +164,7 @@ def main() -> dict[str, Any] | None:
     print(f"Loaded {len(reviewed_labels)} reviewed labels from {REVIEWED_LABELS_PATH}")
 
     db = SessionLocal()
-    cfg = FeatureConfigV1()
+    cfg = FeatureConfigV2()
 
     try:
         trips = db.execute(
@@ -191,6 +191,7 @@ def main() -> dict[str, Any] | None:
                     "speed": row.speed_mps,
                     "lat": row.lat,
                     "lon": row.lon,
+                    "altitude_m": row.altitude_m,
                     "ax": row.ax,
                     "ay": row.ay,
                     "az": row.az,

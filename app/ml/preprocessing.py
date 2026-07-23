@@ -60,7 +60,7 @@ def preprocess_samples(
     - speed
     - ax, ay, az
     - gx, gy, gz
-    - lat, lon (optional for current pipeline)
+    - lat, lon, altitude_m (optional)
     """
     df = pd.DataFrame(samples)
     if df.empty:

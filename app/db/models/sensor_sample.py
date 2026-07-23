@@ -24,6 +24,7 @@ class SensorSample(Base):
     lat: Mapped[float | None] = mapped_column(Float, nullable=True)
     lon: Mapped[float | None] = mapped_column(Float, nullable=True)
     accuracy_m: Mapped[float | None] = mapped_column(Float, nullable=True)
+    altitude_m: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     ax: Mapped[float | None] = mapped_column(Float, nullable=True)
     ay: Mapped[float | None] = mapped_column(Float, nullable=True)

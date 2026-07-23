@@ -30,10 +30,11 @@ from app.db.models.trip import Trip
 from app.db.models.user import User
 from app.db.session import commit_with_retry
 from app.ml.auto_retrain import maybe_schedule_auto_retrain
-from app.ml.config import FeatureConfigV1
+from app.ml.config import FeatureConfigV2
 from app.ml.event_generation import build_human_reasons
 from app.ml.inference import ModelScorer
 from app.ml.pipeline import run_trip_pipeline
+from app.ml.schemas import MODEL_VERSION_RULES_V1
 from app.repositories.trip_repository import SqlTripRepository
 from app.repositories.user_repository import UserRecord
 
@@ -57,10 +58,10 @@ class TripProcessingService:
         "speed_variation",
     }
 
-    def __init__(self, db: Session) -> None:
+    def __init__(self, db: Session, cfg: FeatureConfigV2 | None = None) -> None:
         self.db = db
         self.trip_repo = SqlTripRepository(db)
-        self.cfg = FeatureConfigV1()
+        self.cfg = cfg or FeatureConfigV2()
         self.model_scorer = ModelScorer()
 
     def _load_trip(self, user_id: str, trip_id: str) -> Trip:
@@ -318,7 +319,7 @@ class TripProcessingService:
             "confidence": confidence,
             "confidence_band": self._confidence_band(confidence),
             "confidence_display": self._confidence_display(confidence),
-            "model_version": "rules_v1",
+            "model_version": MODEL_VERSION_RULES_V1,
             "feature_version": feature_version,
             "decision_source": "rules_fallback",
             "processing_timestamp": None,
@@ -533,7 +534,12 @@ class TripProcessingService:
         sample_payload = self._samples_to_payload(sample_rows)
         sample_ids = [row.id for row in sample_rows]
 
-        self.db.rollback()
+        # Release the DB transaction so the pipeline can run without holding
+        # a long-lived connection lock (important for SQLite WAL mode).
+        # Only rollback if there is actually an active transaction to avoid
+        # discarding state from sibling operations in the same session.
+        if self.db.in_transaction():
+            self.db.rollback()
 
         pipeline_result = run_trip_pipeline(sample_payload, self.cfg)
 
@@ -559,7 +565,7 @@ class TripProcessingService:
 
         ml_prediction: int | None = None
         ml_risk_probability: float | None = None
-        model_version = "rules_v1"
+        model_version = MODEL_VERSION_RULES_V1
         ml_used = False
 
         if trip_features and confidence >= ML_CONFIDENCE_THRESHOLD:

@@ -101,46 +101,24 @@ def _is_sqlite_lock_error(error: Exception) -> bool:
     return settings.database_url.startswith("sqlite") and "database is locked" in str(error).lower()
 
 
-def _column_snapshot(instance: object) -> dict[str, object]:
-    mapper = sa_inspect(instance).mapper
-    snapshot: dict[str, object] = {}
-    for attr in mapper.column_attrs:
-        key = attr.key
-        snapshot[key] = getattr(instance, key)
-    return snapshot
-
-
 def commit_with_retry(db: Session) -> None:
+    """
+    Commit a database session with retry logic for SQLite lock errors.
+
+    On SQLite, concurrent writes can trigger 'database is locked' errors.
+    This function retries using exponential backoff. Non-lock errors are
+    re-raised immediately.
+    """
     for attempt in range(SQLITE_LOCK_RETRY_ATTEMPTS):
         try:
             db.commit()
             return
         except OperationalError as exc:
-            new_instances = list(db.new)
-            dirty_instances = [instance for instance in db.dirty if db.is_modified(instance, include_collections=False)]
-            deleted_instances = list(db.deleted)
-            dirty_snapshots = {id(instance): _column_snapshot(instance) for instance in dirty_instances}
-
-            db.rollback()
             is_last_attempt = attempt == SQLITE_LOCK_RETRY_ATTEMPTS - 1
             if not _is_sqlite_lock_error(exc) or is_last_attempt:
                 raise
 
-            # rollback clears pending/dirty state; restore pending work before retrying
-            for instance in new_instances:
-                db.add(instance)
-
-            for instance in dirty_instances:
-                for key, value in dirty_snapshots[id(instance)].items():
-                    setattr(instance, key, value)
-                db.add(instance)
-
-            for instance in deleted_instances:
-                try:
-                    db.delete(instance)
-                except Exception:
-                    pass
-
+            db.rollback()
             time.sleep(SQLITE_LOCK_RETRY_BASE_DELAY_SECONDS * (attempt + 1))
 
 

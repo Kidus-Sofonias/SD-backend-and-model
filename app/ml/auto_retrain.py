@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import json
-import subprocess
-import sys
+import logging
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,11 +10,15 @@ from typing import Any
 from app.core.config import settings
 
 
+logger = logging.getLogger(__name__)
+
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 REPORTS_DIR = BACKEND_ROOT / "artifacts" / "reports"
 STATE_PATH = REPORTS_DIR / "auto_retrain_state.json"
 
-_state_lock = threading.Lock()
+# RLock is required because _queue_pending_run_if_needed() is called from
+# _run_refresh_cycle() while the lock is already held.
+_state_lock = threading.RLock()
 _active_thread: threading.Thread | None = None
 
 
@@ -73,35 +76,36 @@ def should_request_auto_retrain(
     return milestone > max(0, last_requested_milestone)
 
 
-def _build_refresh_command() -> list[str]:
-    command = [sys.executable, "scripts/refresh_model_cycle.py"]
-    if settings.auto_retrain_skip_tests:
-        command.append("--skip-tests")
-    return command
+def _run_refresh_cycle_func(skip_tests: bool = True) -> dict[str, Any]:
+    """Run the full refresh cycle as a direct function call instead of subprocess."""
+    # Lazy import to avoid circular imports and speed up the common path
+    from scripts.refresh_model_cycle import main as refresh_main
+    return refresh_main(skip_tests=skip_tests)
 
 
 def _queue_pending_run_if_needed() -> None:
-    state = _load_state()
-    pending_milestone = int(state.get("pending_milestone") or 0)
-    last_requested_milestone = int(state.get("last_requested_milestone") or 0)
-    if pending_milestone <= last_requested_milestone:
-        return
+    with _state_lock:
+        state = _load_state()
+        pending_milestone = int(state.get("pending_milestone") or 0)
+        last_requested_milestone = int(state.get("last_requested_milestone") or 0)
+        if pending_milestone <= last_requested_milestone:
+            return
 
-    state["pending_milestone"] = 0
-    state["status"] = "queued"
-    state["last_requested_milestone"] = pending_milestone
-    state["queued_at"] = _utc_now_iso()
-    state["active_milestone"] = pending_milestone
-    _save_state(state)
+        state["pending_milestone"] = 0
+        state["status"] = "queued"
+        state["last_requested_milestone"] = pending_milestone
+        state["queued_at"] = _utc_now_iso()
+        state["active_milestone"] = pending_milestone
+        _save_state(state)
 
-    global _active_thread
-    _active_thread = threading.Thread(
-        target=_run_refresh_cycle,
-        args=(pending_milestone,),
-        name=f"auto-retrain-{pending_milestone}",
-        daemon=True,
-    )
-    _active_thread.start()
+        global _active_thread
+        _active_thread = threading.Thread(
+            target=_run_refresh_cycle,
+            args=(pending_milestone,),
+            name=f"auto-retrain-{pending_milestone}",
+            daemon=True,
+        )
+        _active_thread.start()
 
 
 def _run_refresh_cycle(milestone: int) -> None:
@@ -113,23 +117,14 @@ def _run_refresh_cycle(milestone: int) -> None:
         _save_state(state)
 
     try:
-        result = subprocess.run(
-            _build_refresh_command(),
-            cwd=BACKEND_ROOT,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        succeeded = result.returncode == 0
-        stdout_tail = result.stdout.strip().splitlines()[-20:]
-        stderr_tail = result.stderr.strip().splitlines()[-20:]
-        returncode = result.returncode
+        skip_tests = settings.auto_retrain_skip_tests
+        cycle_report = _run_refresh_cycle_func(skip_tests=skip_tests)
+        succeeded = True
         error_message = None
     except Exception as exc:
+        logger.exception("Auto retrain cycle failed")
         succeeded = False
-        stdout_tail = []
-        stderr_tail = []
-        returncode = None
+        cycle_report = None
         error_message = str(exc)
 
     with _state_lock:
@@ -137,9 +132,6 @@ def _run_refresh_cycle(milestone: int) -> None:
         state["status"] = "succeeded" if succeeded else "failed"
         state["finished_at"] = _utc_now_iso()
         state["active_milestone"] = milestone
-        state["last_returncode"] = returncode
-        state["stdout_tail"] = stdout_tail
-        state["stderr_tail"] = stderr_tail
         state["last_error"] = error_message
         if succeeded:
             state["last_succeeded_milestone"] = milestone

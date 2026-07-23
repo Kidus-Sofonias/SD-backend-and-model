@@ -42,8 +42,8 @@ from app.db.models.trip import Trip
 from app.db.models.sensor_sample import SensorSample
 
 DEFAULT_TOTAL_TRIPS = 50
-DEFAULT_SAMPLES_PER_TRIP = 240   # 240 * 0.5s = 120 seconds
-DEFAULT_DT_SECONDS = 0.5
+DEFAULT_SAMPLES_PER_TRIP = 400   # 400 * 0.3s = 120 seconds (more samples, finer granularity)
+DEFAULT_DT_SECONDS = 0.3         # Faster sampling rate for richer training data
 
 SYNTHETIC_LABELS_PATH = Path("artifacts/datasets/synthetic_trip_labels.json")
 
@@ -65,37 +65,131 @@ def resolve_user_id(db, user_id: str | None) -> str:
     return first_user.id
 
 
-def base_location() -> tuple[float, float]:
-    return 9.03, 38.74
+# ---------------------------------------------------------------------------
+# Multiple Ethiopian base locations for geographic diversity
+# ---------------------------------------------------------------------------
+LOCATIONS: list[tuple[float, float, float]] = [
+    # (lat, lon, base_altitude_m)
+    (9.0300, 38.7400, 2355.0),   # Addis Ababa centre
+    (8.9800, 38.8000, 2320.0),   # Addis Bole area
+    (9.0200, 38.6900, 2380.0),   # Addis summit area
+    (9.0500, 38.7600, 2340.0),   # Addis north
+    (8.5400, 39.2700, 1720.0),   # Adama (Nazret)
+    (9.6000, 41.8600, 2430.0),   # Dire Dawa area
+    (11.5700, 37.3900, 2130.0),  # Bahir Dar
+    (7.0500, 38.5000, 1750.0),   # Hawassa
+]
+
+
+def pick_location() -> tuple[float, float, float, float, float]:
+    """Return (lat, lon, altitude_m, lat_drift, lon_drift) for a random route."""
+    loc = random.choice(LOCATIONS)
+    # Direction of travel (random bearing)
+    bearing_rad = random.uniform(0, 2 * math.pi)
+    drift_lat = math.cos(bearing_rad) * 0.0003
+    drift_lon = math.sin(bearing_rad) * 0.0003 / math.cos(loc[0] * math.pi / 180)
+    return (*loc, drift_lat, drift_lon)
+
+
+
+def altitude_wobble(base_alt: float, progress: float, roughness: float = 5.0) -> float:
+    """Simulate gentle road elevation changes."""
+    wave1 = math.sin(progress * math.pi * 0.7) * roughness
+    wave2 = math.cos(progress * math.pi * 2.3) * roughness * 0.4
+    wave3 = math.sin(progress * math.pi * 5.1) * roughness * 0.15
+    return base_alt + wave1 + wave2 + wave3 + random.uniform(-1.0, 1.0)
+
 
 
 def generate_safe_profile(samples_per_trip: int, dt_s: float) -> list[dict]:
     rows = []
-    lat, lon = base_location()
-    speed_kmh = random.uniform(28, 42)
+    lat, lon, base_alt, drift_lat, drift_lon = pick_location()
+
+    speed_kmh = random.uniform(24, 38)
 
     for i in range(samples_per_trip):
         t = i * dt_s
+        progress = i / samples_per_trip
 
-        speed_kmh += random.uniform(-0.25, 0.25) + 0.15 * math.sin(t / 10.0)
-        speed_kmh = clamp(speed_kmh, 22, 55)
+        # Smooth, gradual speed changes
+        speed_kmh += random.uniform(-0.2, 0.2) + 0.12 * math.sin(t / 12.0)
+        speed_kmh = clamp(speed_kmh, 18, 50)
 
-        ax = random.uniform(-0.15, 0.15) + 0.03 * math.sin(t / 3.5)
-        ay = random.uniform(-0.12, 0.12) + 0.02 * math.cos(t / 5.0)
-        az = 9.81 + random.uniform(-0.08, 0.08)
+        # Gentle acceleration (m/s^2)
+        ax = random.uniform(-0.12, 0.12) + 0.02 * math.sin(t / 4.0)
+        ay = random.uniform(-0.10, 0.10) + 0.02 * math.cos(t / 6.0)
+        az = 9.81 + random.uniform(-0.06, 0.06)
 
-        gx = random.uniform(-0.05, 0.05)
-        gy = random.uniform(-0.05, 0.05)
-        gz = random.uniform(-0.12, 0.12) + 0.03 * math.sin(t / 6.0)
+        # Low gyro activity
+        gx = random.uniform(-0.04, 0.04)
+        gy = random.uniform(-0.04, 0.04)
+        gz = random.uniform(-0.10, 0.10) + 0.02 * math.sin(t / 7.0)
 
-        lat += random.uniform(-0.00001, 0.00001) + speed_kmh * 0.0000004
-        lon += random.uniform(-0.00001, 0.00001) + speed_kmh * 0.0000002
+        # Steady GPS with smooth progress
+        lat += drift_lat * speed_kmh * 0.001 + random.uniform(-0.000008, 0.000008)
+        lon += drift_lon * speed_kmh * 0.001 + random.uniform(-0.000008, 0.000008)
+        alt = altitude_wobble(base_alt, progress, roughness=3.0)
 
         rows.append({
-            "speed": speed_kmh,   # current pipeline expects this as km/h input
+            "speed": speed_kmh,
             "lat": lat,
             "lon": lon,
-            "accuracy_m": random.uniform(3.0, 8.0),
+            "accuracy_m": random.uniform(2.5, 6.0),
+            "altitude_m": alt,
+            "ax": ax,
+            "ay": ay,
+            "az": az,
+            "gx": gx,
+            "gy": gy,
+            "gz": gz,
+        })
+
+    return rows
+
+
+def generate_moderate_profile(samples_per_trip: int, dt_s: float) -> list[dict]:
+    """Moderate driving with occasional mild events."""
+    rows = []
+    lat, lon, base_alt, drift_lat, drift_lon = pick_location()
+    speed_kmh = random.uniform(28, 45)
+    n_events = random.randint(3, 6)
+    event_centers = random.sample(range(int(samples_per_trip * 0.15), int(samples_per_trip * 0.85)), n_events)
+
+    for i in range(samples_per_trip):
+        t = i * dt_s
+        progress = i / samples_per_trip
+        delta = random.uniform(-0.4, 0.4)
+
+        for c in event_centers:
+            dist = abs(i - c)
+            if dist <= 6:
+                intensity = 1.0 - dist / 6.0
+                if random.random() < 0.5:
+                    delta -= intensity * random.uniform(1.2, 3.0)  # brake
+                else:
+                    delta += intensity * random.uniform(1.2, 3.0)  # accel
+
+        speed_kmh += delta
+        speed_kmh = clamp(speed_kmh, 12, 75)
+
+        ax = random.uniform(-0.4, 0.4) + 0.10 * math.sin(t / 3.0)
+        ay = random.uniform(-0.3, 0.3) + 0.08 * math.cos(t / 4.0)
+        az = 9.81 + random.uniform(-0.12, 0.12)
+
+        gx = random.uniform(-0.15, 0.15)
+        gy = random.uniform(-0.15, 0.15)
+        gz = random.uniform(-0.25, 0.25)
+
+        lat += drift_lat * speed_kmh * 0.001 + random.uniform(-0.00001, 0.00001)
+        lon += drift_lon * speed_kmh * 0.001 + random.uniform(-0.00001, 0.00001)
+        alt = altitude_wobble(base_alt, progress, roughness=4.0)
+
+        rows.append({
+            "speed": speed_kmh,
+            "lat": lat,
+            "lon": lon,
+            "accuracy_m": random.uniform(3.0, 9.0),
+            "altitude_m": alt,
             "ax": ax,
             "ay": ay,
             "az": az,
@@ -109,50 +203,55 @@ def generate_safe_profile(samples_per_trip: int, dt_s: float) -> list[dict]:
 
 def generate_risky_profile(samples_per_trip: int, dt_s: float) -> list[dict]:
     rows = []
-    lat, lon = base_location()
-    speed_kmh = random.uniform(35, 50)
+    lat, lon, base_alt, drift_lat, drift_lon = pick_location()
 
-    hard_brake_centers = random.sample(range(30, samples_per_trip - 30), 5)
-    hard_accel_centers = random.sample(range(30, samples_per_trip - 30), 5)
-    turn_centers = random.sample(range(30, samples_per_trip - 30), 6)
+    speed_kmh = random.uniform(35, 55)
+
+    hard_brake_centers = random.sample(range(int(samples_per_trip * 0.1), int(samples_per_trip * 0.9)), 6)
+    hard_accel_centers = random.sample(range(int(samples_per_trip * 0.1), int(samples_per_trip * 0.9)), 6)
+    turn_centers = random.sample(range(int(samples_per_trip * 0.1), int(samples_per_trip * 0.9)), 8)
 
     for i in range(samples_per_trip):
         t = i * dt_s
+        progress = i / samples_per_trip
 
-        delta = random.uniform(-0.8, 0.8)
+        delta = random.uniform(-1.0, 1.0)
 
         for c in hard_accel_centers:
-            if abs(i - c) <= 4:
-                delta += random.uniform(2.5, 5.5)
+            if abs(i - c) <= 5:
+                delta += random.uniform(2.8, 6.5)
 
         for c in hard_brake_centers:
-            if abs(i - c) <= 4:
-                delta -= random.uniform(3.0, 6.0)
+            if abs(i - c) <= 5:
+                delta -= random.uniform(3.5, 7.0)
 
         speed_kmh += delta
-        speed_kmh = clamp(speed_kmh, 5, 95)
+        speed_kmh = clamp(speed_kmh, 3, 100)
 
-        ax = random.uniform(-0.8, 0.8) + 0.18 * math.sin(t / 2.0)
-        ay = random.uniform(-0.7, 0.7) + 0.14 * math.cos(t / 2.8)
-        az = 9.81 + random.uniform(-0.25, 0.25)
+        ax = random.uniform(-1.0, 1.0) + 0.20 * math.sin(t / 1.8)
+        ay = random.uniform(-0.8, 0.8) + 0.16 * math.cos(t / 2.5)
+        az = 9.81 + random.uniform(-0.30, 0.30)
 
-        gx = random.uniform(-0.3, 0.3)
-        gy = random.uniform(-0.3, 0.3)
-        gz = random.uniform(-0.45, 0.45)
+        gx = random.uniform(-0.35, 0.35)
+        gy = random.uniform(-0.35, 0.35)
+        gz = random.uniform(-0.50, 0.50)
 
         for c in turn_centers:
-            if abs(i - c) <= 5:
-                gz += random.choice([-1, 1]) * random.uniform(1.2, 2.8)
-                ay += random.choice([-1, 1]) * random.uniform(0.7, 1.5)
+            if abs(i - c) <= 6:
+                gz += random.choice([-1, 1]) * random.uniform(1.5, 3.5)
+                ay += random.choice([-1, 1]) * random.uniform(0.8, 2.0)
+                ax += random.uniform(-0.3, 0.3)
 
-        lat += random.uniform(-0.00002, 0.00002) + speed_kmh * 0.00000045
-        lon += random.uniform(-0.00002, 0.00002) + speed_kmh * 0.00000025
+        lat += drift_lat * speed_kmh * 0.001 + random.uniform(-0.00002, 0.00002)
+        lon += drift_lon * speed_kmh * 0.001 + random.uniform(-0.00002, 0.00002)
+        alt = altitude_wobble(base_alt, progress, roughness=7.0)
 
         rows.append({
             "speed": speed_kmh,
             "lat": lat,
             "lon": lon,
-            "accuracy_m": random.uniform(4.0, 12.0),
+            "accuracy_m": random.uniform(4.0, 14.0),
+            "altitude_m": alt,
             "ax": ax,
             "ay": ay,
             "az": az,
@@ -187,10 +286,11 @@ def create_trip_with_samples(
             user_id=user_id,
             trip_id=trip.id,
             ts=ts,
-            speed_mps=row["speed"],   # stored as current pipeline expects: km/h input
+            speed_mps=row["speed"],
             lat=row["lat"],
             lon=row["lon"],
             accuracy_m=row["accuracy_m"],
+            altitude_m=row.get("altitude_m"),
             ax=row["ax"],
             ay=row["ay"],
             az=row["az"],
@@ -238,6 +338,7 @@ def generate_synthetic_trips(
         return {
             "created_count": 0,
             "safe_count": 0,
+            "moderate_count": 0,
             "risky_count": 0,
             "samples_per_trip": samples_per_trip,
             "dt": dt,
@@ -253,8 +354,9 @@ def generate_synthetic_trips(
     try:
         resolved_user_id = resolve_user_id(db, user_id)
 
-        safe_count = count // 2
-        risky_count = count - safe_count
+        safe_count = count // 3
+        moderate_count = count // 3
+        risky_count = count - safe_count - moderate_count
 
         now = datetime.now(timezone.utc)
         created_trip_ids: list[tuple[str, str]] = []
@@ -267,6 +369,14 @@ def generate_synthetic_trips(
             rows = generate_safe_profile(samples_per_trip, dt)
             trip_id = create_trip_with_samples(db, resolved_user_id, rows, started_at, dt)
             created_trip_ids.append((trip_id, "safe"))
+            synthetic_labels[trip_id] = 0
+            trip_index += 1
+
+        for _ in range(moderate_count):
+            started_at = now - timedelta(days=trip_index + 1, minutes=random.randint(0, 120))
+            rows = generate_moderate_profile(samples_per_trip, dt)
+            trip_id = create_trip_with_samples(db, resolved_user_id, rows, started_at, dt)
+            created_trip_ids.append((trip_id, "moderate"))
             synthetic_labels[trip_id] = 0
             trip_index += 1
 
@@ -284,6 +394,7 @@ def generate_synthetic_trips(
         return {
             "created_count": len(created_trip_ids),
             "safe_count": safe_count,
+            "moderate_count": moderate_count,
             "risky_count": risky_count,
             "samples_per_trip": samples_per_trip,
             "dt": dt,
@@ -317,8 +428,9 @@ def main():
     )
 
     print(f"Generated {result['created_count']} synthetic trips for user {result['user_id']}")
-    print(f"Safe trips:  {result['safe_count']}")
-    print(f"Risky trips: {result['risky_count']}")
+    print(f"Safe trips:     {result['safe_count']}")
+    print(f"Moderate trips: {result['moderate_count']}")
+    print(f"Risky trips:    {result['risky_count']}")
     print(f"Synthetic label registry updated at: {result['synthetic_labels_path']}")
     print("Example trip IDs:")
     for trip_id, label in list(result["created_trip_ids"])[:10]:

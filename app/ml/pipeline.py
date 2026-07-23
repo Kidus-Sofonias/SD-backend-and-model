@@ -4,16 +4,16 @@
 # app/ml/pipeline.py
 from __future__ import annotations
 from typing import Dict, Any, List
-from .config import FeatureConfigV1
+from .config import FeatureConfigV2
 from .event_generation import generate_trip_events
 from .preprocessing import preprocess_samples
 from .features import compute_per_sample_features, aggregate_trip_features
 from .scoring_rules import score_trip_rules_v1
+from .schemas import FEATURE_VERSION, MODEL_VERSION_RULES_V1
 
-FEATURE_VERSION = "fv1"
-MODEL_VERSION = "rules_v1"
+MODEL_VERSION = MODEL_VERSION_RULES_V1
 
-def run_trip_pipeline(samples: List[Dict[str, Any]], cfg: FeatureConfigV1) -> Dict[str, Any]:
+def run_trip_pipeline(samples: List[Dict[str, Any]], cfg: FeatureConfigV2) -> Dict[str, Any]:
     df = preprocess_samples(samples, cfg.max_gap_s, cfg.ema_alpha, cfg.input_speed_unit)
     if df.empty or len(df) < cfg.min_samples_for_scoring:
         # not enough data to score

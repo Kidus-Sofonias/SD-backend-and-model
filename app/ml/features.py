@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 from .braking import classify_brake_segment
+from .event_utils import count_events, event_segments
 
 
 def compute_per_sample_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -48,102 +49,6 @@ def compute_per_sample_features(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _count_events(
-    mask: np.ndarray,
-    timestamps: np.ndarray,
-    min_duration_s: float,
-    merge_gap_s: float,
-) -> int:
-    """
-    Count sustained events from a boolean mask.
-    Example use: harsh braking mask, harsh acceleration mask, aggressive turning mask.
-    """
-    idx = np.where(mask)[0]
-    if len(idx) == 0:
-        return 0
-
-    groups = []
-    start = idx[0]
-    prev = idx[0]
-
-    for i in idx[1:]:
-        if i == prev + 1:
-            prev = i
-        else:
-            groups.append((start, prev))
-            start = i
-            prev = i
-    groups.append((start, prev))
-
-    merged = []
-    for s, e in groups:
-        if not merged:
-            merged.append([s, e])
-            continue
-
-        prev_s, prev_e = merged[-1]
-        gap = timestamps[s] - timestamps[prev_e]
-        if gap <= merge_gap_s:
-            merged[-1][1] = e
-        else:
-            merged.append([s, e])
-
-    count = 0
-    for s, e in merged:
-        duration = timestamps[e] - timestamps[s]
-        if duration >= min_duration_s:
-            count += 1
-
-    return count
-
-
-def _event_segments(
-    mask: np.ndarray,
-    timestamps: np.ndarray,
-    min_duration_s: float,
-    merge_gap_s: float,
-) -> list[tuple[int, int]]:
-    """
-    Return sustained event index ranges from a boolean mask.
-    """
-    idx = np.where(mask)[0]
-    if len(idx) == 0:
-        return []
-
-    groups: list[tuple[int, int]] = []
-    start = idx[0]
-    prev = idx[0]
-
-    for i in idx[1:]:
-        if i == prev + 1:
-            prev = i
-        else:
-            groups.append((start, prev))
-            start = i
-            prev = i
-    groups.append((start, prev))
-
-    merged: list[list[int]] = []
-    for s, e in groups:
-        if not merged:
-            merged.append([s, e])
-            continue
-
-        prev_s, prev_e = merged[-1]
-        gap = timestamps[s] - timestamps[prev_e]
-        if gap <= merge_gap_s:
-            merged[-1][1] = e
-        else:
-            merged.append([s, e])
-
-    segments: list[tuple[int, int]] = []
-    for s, e in merged:
-        duration = timestamps[e] - timestamps[s]
-        if duration >= min_duration_s:
-            segments.append((s, e))
-
-    return segments
-
 
 def aggregate_trip_features(
     per: pd.DataFrame,
@@ -168,15 +73,15 @@ def aggregate_trip_features(
     harsh_brake_mask = per["dv"].to_numpy() < harsh_brake_dv
     harsh_accel_mask = per["dv"].to_numpy() > harsh_accel_dv
     aggressive_turn_mask = per["turn_intensity"].to_numpy() > aggressive_turn_threshold
-    harsh_brake_segments = _event_segments(
+    harsh_brake_segments = event_segments(
         harsh_brake_mask,
         t,
         min_event_duration_s,
         merge_gap_s,
     )
     harsh_brake_count = len(harsh_brake_segments)
-    harsh_accel_count = _count_events(harsh_accel_mask, t, min_event_duration_s, merge_gap_s)
-    aggressive_turn_count = _count_events(aggressive_turn_mask, t, min_event_duration_s, merge_gap_s)
+    harsh_accel_count = count_events(harsh_accel_mask, t, min_event_duration_s, merge_gap_s)
+    aggressive_turn_count = count_events(aggressive_turn_mask, t, min_event_duration_s, merge_gap_s)
 
     emergency_brake_count = sum(
         1

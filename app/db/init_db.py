@@ -27,18 +27,28 @@ def _ensure_user_role_column() -> None:
 
 
 def _seed_default_admin() -> None:
+    admin_password = settings.admin_password
+    if not admin_password:
+        # No admin password configured — skip seeding.
+        # This is fine in development where secrets are auto-generated.
+        # In production, the @model_validator will catch missing secrets.
+        print("Skipping admin seed: ADMIN_PASSWORD not configured. Set it in .env to create the admin user.")
+        return
+
     db = SessionLocal()
     try:
-        admin_email = settings.admin_email.lower()
+        admin_email = settings.admin_email.lower().strip()
+        if not admin_email:
+            return
+
         admin = db.execute(select(User).where(User.email == admin_email)).scalar_one_or_none()
-        desired_password = settings.admin_password
 
         if admin is None:
             db.add(
                 User(
                     id=str(uuid.uuid4()),
                     email=admin_email,
-                    password_hash=hash_password(desired_password),
+                    password_hash=hash_password(admin_password),
                     role="admin",
                 )
             )
@@ -49,8 +59,8 @@ def _seed_default_admin() -> None:
         if admin.role != "admin":
             admin.role = "admin"
             changed = True
-        if not verify_password(desired_password, admin.password_hash):
-            admin.password_hash = hash_password(desired_password)
+        if not verify_password(admin_password, admin.password_hash):
+            admin.password_hash = hash_password(admin_password)
             changed = True
         if changed:
             db.add(admin)

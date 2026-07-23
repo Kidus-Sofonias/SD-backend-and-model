@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import AppError, ForbiddenError, NotFoundError
 from app.core.security import hash_password
+from app.core.utils import as_utc_timestamp
 from app.db.models.driving_event import DrivingEvent
 from app.db.models.sensor_sample import SensorSample
 from app.db.models.trip import Trip
@@ -28,13 +29,6 @@ class AdminService:
     def _require_admin(self, actor: UserRecord) -> None:
         if not actor.is_admin:
             raise ForbiddenError(message_key="auth.forbidden")
-
-    def _as_utc_timestamp(self, ts):
-        if ts is None:
-            return ts
-        if ts.tzinfo is None:
-            return ts.replace(tzinfo=timezone.utc)
-        return ts.astimezone(timezone.utc)
 
     def list_drivers(self, actor: UserRecord) -> list[DriverRecord]:
         self._require_admin(actor)
@@ -265,7 +259,7 @@ class AdminService:
 
         points = [
             {
-                "ts": self._as_utc_timestamp(sample.ts),
+                "ts": as_utc_timestamp(sample.ts),
                 "lat": float(sample.lat),
                 "lon": float(sample.lon),
                 "speed_mps": sample.speed_mps,

@@ -10,7 +10,7 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from app.ml.config import FeatureConfigV1
+from app.ml.config import FeatureConfigV2
 from app.ml.pipeline import run_trip_pipeline
 from app.ml.preprocessing import preprocess_samples
 
@@ -42,7 +42,7 @@ def test_preprocess_samples_preserves_half_second_dt() -> None:
 
 
 def test_run_trip_pipeline_uses_seconds_not_milliseconds() -> None:
-    cfg = FeatureConfigV1()
+    cfg = FeatureConfigV2()
     start = datetime(2026, 1, 30, 8, 1, 11, 302824, tzinfo=timezone.utc)
     samples = [_sample((start + timedelta(seconds=0.5 * i)).isoformat(), 36.0) for i in range(240)]
 

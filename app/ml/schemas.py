@@ -9,6 +9,7 @@
 # - FEATURE_COLUMNS_FV1
 
 FEATURE_VERSION = "fv1"
+MODEL_VERSION_RULES_V1 = "rules_v1"
 
 FEATURE_COLUMNS_FV1 = [
     "duration_s",

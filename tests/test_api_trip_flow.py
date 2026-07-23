@@ -41,7 +41,7 @@ def _load_samples() -> list[dict]:
 def _load_too_few_samples() -> list[dict]:
     base_ts = datetime(2026, 3, 24, 11, 6, 0, tzinfo=timezone.utc)
     samples: list[dict] = []
-    for i in range(2):
+    for i in range(1):
         ts = (base_ts + timedelta(seconds=i)).isoformat().replace("+00:00", "Z")
         samples.append(
             {

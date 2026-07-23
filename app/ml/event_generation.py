@@ -15,55 +15,10 @@ import numpy as np
 import pandas as pd
 
 from .braking import classify_brake_segment
+from .event_utils import event_segments
 
 UNSTABLE_MOTION_JERK_THRESHOLD = 0.12
 SPEED_VARIATION_DV_THRESHOLD = 2.25
-
-
-def _event_segments(
-    mask: np.ndarray,
-    timestamps: np.ndarray,
-    min_duration_s: float,
-    merge_gap_s: float,
-) -> list[tuple[int, int]]:
-    idx = np.where(mask)[0]
-    if len(idx) == 0:
-        return []
-
-    groups: list[tuple[int, int]] = []
-    start = idx[0]
-    prev = idx[0]
-
-    for i in idx[1:]:
-        if i == prev + 1:
-            prev = i
-        else:
-            groups.append((start, prev))
-            start = i
-            prev = i
-    groups.append((start, prev))
-
-    merged: list[list[int]] = []
-    for s, e in groups:
-        if not merged:
-            merged.append([s, e])
-            continue
-
-        _, prev_e = merged[-1]
-        gap = timestamps[s] - timestamps[prev_e]
-        if gap <= merge_gap_s:
-            merged[-1][1] = e
-        else:
-            merged.append([s, e])
-
-    segments: list[tuple[int, int]] = []
-    for s, e in merged:
-        duration = timestamps[e] - timestamps[s]
-        if duration >= min_duration_s:
-            segments.append((s, e))
-
-    return segments
-
 
 def _isoformat_timestamp(value: object) -> str | None:
     if value is None:
@@ -138,7 +93,7 @@ def generate_trip_events(
 
     events: list[dict] = []
 
-    harsh_brake_segments = _event_segments(dv < harsh_brake_dv, t, min_event_duration_s, merge_gap_s)
+    harsh_brake_segments = event_segments(dv < harsh_brake_dv, t, min_event_duration_s, merge_gap_s)
     for start, end in harsh_brake_segments:
         peak_idx = _peak_index(dv, start, end, mode="min")
         event_type = classify_brake_segment(
@@ -158,7 +113,7 @@ def generate_trip_events(
             )
         )
 
-    harsh_accel_segments = _event_segments(dv > harsh_accel_dv, t, min_event_duration_s, merge_gap_s)
+    harsh_accel_segments = event_segments(dv > harsh_accel_dv, t, min_event_duration_s, merge_gap_s)
     for start, end in harsh_accel_segments:
         peak_idx = _peak_index(dv, start, end, mode="max")
         events.append(
@@ -170,7 +125,7 @@ def generate_trip_events(
             )
         )
 
-    aggressive_turn_segments = _event_segments(turn > aggressive_turn_threshold, t, min_event_duration_s, merge_gap_s)
+    aggressive_turn_segments = event_segments(turn > aggressive_turn_threshold, t, min_event_duration_s, merge_gap_s)
     for start, end in aggressive_turn_segments:
         peak_idx = _peak_index(turn, start, end, mode="max")
         events.append(
@@ -182,7 +137,7 @@ def generate_trip_events(
             )
         )
 
-    unstable_motion_segments = _event_segments(jerk >= UNSTABLE_MOTION_JERK_THRESHOLD, t, min_event_duration_s, merge_gap_s)
+    unstable_motion_segments = event_segments(jerk >= UNSTABLE_MOTION_JERK_THRESHOLD, t, min_event_duration_s, merge_gap_s)
     for start, end in unstable_motion_segments:
         peak_idx = _peak_index(jerk, start, end, mode="max")
         events.append(
@@ -194,7 +149,7 @@ def generate_trip_events(
             )
         )
 
-    speed_variation_segments = _event_segments(np.abs(dv) >= SPEED_VARIATION_DV_THRESHOLD, t, min_event_duration_s, merge_gap_s)
+    speed_variation_segments = event_segments(np.abs(dv) >= SPEED_VARIATION_DV_THRESHOLD, t, min_event_duration_s, merge_gap_s)
     for start, end in speed_variation_segments:
         peak_idx = _peak_index(dv, start, end, mode="abs")
         events.append(

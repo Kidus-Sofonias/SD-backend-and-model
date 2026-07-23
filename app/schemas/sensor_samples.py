@@ -19,6 +19,7 @@ class SensorSampleIn(BaseModel):
     lat: Optional[float] = None
     lon: Optional[float] = None
     accuracy_m: Optional[float] = None
+    altitude_m: Optional[float] = None
 
     ax: Optional[float] = None
     ay: Optional[float] = None
