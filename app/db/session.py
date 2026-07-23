@@ -25,13 +25,24 @@ if settings.database_url.startswith("sqlite"):
 
 
 def _resolve_ipv4(url: str) -> str:
-    """Resolve a PostgreSQL hostname to an IPv4 address to avoid IPv6 routing issues (e.g., on Render)."""
+    """Resolve a PostgreSQL hostname to an IPv4 address to avoid IPv6 routing issues (e.g., on Render).
+
+    Skips hostnames that require SNI (Server Name Indication) for routing, such as
+    Supabase connection poolers.  Supavisor uses the hostname to identify the tenant,
+    so resolving it to a raw IP would break the connection.
+    """
     if not url.startswith("postgresql"):
         return url
     parsed = urlparse(url)
     hostname = parsed.hostname
     if not hostname:
         return url
+
+    # Skip resolution for connection poolers that rely on SNI to route traffic.
+    # Supabase's Supavisor pooler requires the original hostname to identify the tenant.
+    if hostname.endswith(".pooler.supabase.com"):
+        return url
+
     try:
         addrs = socket.getaddrinfo(hostname, None, socket.AF_INET)
         if addrs:
