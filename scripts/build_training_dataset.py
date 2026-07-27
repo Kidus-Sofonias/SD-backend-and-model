@@ -43,6 +43,7 @@ from scripts.reporting_utils import build_dataset_summary
 
 OUTPUT_PATH = Path("artifacts/datasets/trip_features_fv1.csv")
 SYNTHETIC_LABELS_PATH = ROOT / "artifacts" / "datasets" / "synthetic_trip_labels.json"
+STRONG_LABELS_PATH = ROOT / "artifacts" / "datasets" / "synthetic_ground_truth_labels.json"
 REVIEWED_LABELS_PATH = ROOT / "artifacts" / "datasets" / "reviewed_trip_labels.json"
 REPORT_PATH = Path("artifacts/reports/dataset_summary_fv1.json")
 
@@ -55,6 +56,18 @@ def load_synthetic_labels() -> dict[str, int]:
         return {str(k): int(v) for k, v in data.items()}
     except Exception as exc:
         print(f"Warning: failed to load synthetic label registry: {exc}")
+        return {}
+
+
+def load_strong_labels() -> dict[str, int]:
+    """Load ground-truth labels from the synthetic generator (strong labels)."""
+    if not STRONG_LABELS_PATH.exists():
+        return {}
+    try:
+        data = json.loads(STRONG_LABELS_PATH.read_text(encoding="utf-8"))
+        return {str(k): int(v) for k, v in data.items()}
+    except Exception as exc:
+        print(f"Warning: failed to load strong label registry: {exc}")
         return {}
 
 
@@ -84,7 +97,15 @@ def choose_label(
     rule_score: int | None,
     reviewed_labels: dict[str, int],
     synthetic_labels: dict[str, int],
+    strong_labels: dict[str, int],
 ) -> tuple[int | None, str, str]:
+    """
+    Label priority (highest to lowest):
+      1. Human-reviewed label (trip.reviewed_label or reviewed_labels registry)
+      2. Synthetic ground-truth label (strong_labels — from generator, known ground truth)
+      3. Weak rule-based label (from rule_score — useful when ground truth unknown)
+      4. Synthetic bootstrap label (from old synthetic_registry — lowest confidence)
+    """
     if trip.reviewed_label is not None:
         reviewed_source = (trip.reviewed_label_source or "reviewed_real").strip() or "reviewed_real"
         if "synthetic" in reviewed_source.lower():
@@ -93,6 +114,10 @@ def choose_label(
 
     if trip.id in reviewed_labels:
         return reviewed_labels[trip.id], "reviewed_registry", "reviewed_real"
+
+    # Strong ground-truth from generator — these are known-safe or known-risky
+    if trip.id in strong_labels:
+        return strong_labels[trip.id], "synthetic_ground_truth", "synthetic_ground_truth"
 
     weak = make_weak_label(rule_score)
     if weak is not None:
@@ -115,6 +140,7 @@ def select_rows_for_training(rows: list[dict]) -> tuple[list[dict], dict[str, di
     priority_order = [
         "reviewed_real",
         "reviewed_synthetic",
+        "synthetic_ground_truth",  # Ground-truth from generator — stronger than weak rules
         "weak_label",
         "synthetic_bootstrap",
     ]
@@ -159,8 +185,10 @@ def main() -> dict[str, Any] | None:
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     synthetic_labels = load_synthetic_labels()
+    strong_labels = load_strong_labels()
     reviewed_labels = load_reviewed_labels()
     print(f"Loaded {len(synthetic_labels)} synthetic labels from {SYNTHETIC_LABELS_PATH}")
+    print(f"Loaded {len(strong_labels)} ground-truth labels from {STRONG_LABELS_PATH}")
     print(f"Loaded {len(reviewed_labels)} reviewed labels from {REVIEWED_LABELS_PATH}")
 
     db = SessionLocal()
@@ -186,9 +214,11 @@ def main() -> dict[str, Any] | None:
 
             samples = []
             for row in sample_rows:
+                # speed_mps stores m/s; pipeline expects km/h — convert here
+                speed_kph = row.speed_mps * 3.6 if row.speed_mps is not None else None
                 samples.append({
                     "timestamp": row.ts.isoformat() if row.ts else None,
-                    "speed": row.speed_mps,
+                    "speed": speed_kph,
                     "lat": row.lat,
                     "lon": row.lon,
                     "altitude_m": row.altitude_m,
@@ -213,6 +243,7 @@ def main() -> dict[str, Any] | None:
                 rule_score,
                 reviewed_labels,
                 synthetic_labels,
+                strong_labels,
             )
 
             if label_binary is None:

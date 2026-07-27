@@ -22,7 +22,7 @@ class FeatureConfigV2:
     ema_alpha: float = 0.30
     min_samples_for_scoring: int = 2
 
-    # IMPORTANT: your app currently sends speed in km/h
+    # Speed is stored in m/s in the database (speed_mps column)
     input_speed_unit: str = "kmh"
 
     # thresholds in m/s^2

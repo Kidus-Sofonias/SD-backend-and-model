@@ -32,3 +32,8 @@ curl
 .vscode/
 .DS_Store
 Thumbs.db
+nul
+*.db
+migration_csv/
+scripts/export_sqlite.py
+scripts/import_to_supabase.py

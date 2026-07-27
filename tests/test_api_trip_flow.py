@@ -35,7 +35,12 @@ def _make_session_factory(tmp_path: Path):
 
 def _load_samples() -> list[dict]:
     dataset_path = BACKEND_ROOT / "artifacts" / "datasets" / "risky_batch" / "risky_trip_240_samples_1.json"
-    return json.loads(dataset_path.read_text(encoding="utf-8"))["samples"]
+    samples = json.loads(dataset_path.read_text(encoding="utf-8"))["samples"]
+    # Legacy test data has speed in km/h; convert to m/s for DB storage
+    for sample in samples:
+        if sample.get("speed") is not None:
+            sample["speed"] = sample["speed"] / 3.6
+    return samples
 
 
 def _load_too_few_samples() -> list[dict]:
@@ -43,6 +48,7 @@ def _load_too_few_samples() -> list[dict]:
     samples: list[dict] = []
     for i in range(1):
         ts = (base_ts + timedelta(seconds=i)).isoformat().replace("+00:00", "Z")
+        # Speed in m/s (12 m/s ≈ 43 km/h)
         samples.append(
             {
                 "timestamp": ts,

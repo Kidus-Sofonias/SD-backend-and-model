@@ -106,10 +106,21 @@ class TripProcessingService:
         payload: list[dict] = []
 
         for row in rows:
+            # Ensure the timestamp always includes timezone info so that
+            # preprocess_samples can parse it reliably with pd.to_datetime.
+            # SQLite's DateTime column strips tzinfo on read-back, and
+            # pandas chokes on a Series with mixed formats (with/without
+            # microseconds). Adding a timezone makes all entries uniform.
+            ts = row.ts
+            if ts is not None and ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+
+            # speed_mps stores m/s; pipeline expects km/h — convert here
+            speed_kph = row.speed_mps * 3.6 if row.speed_mps is not None else None
             payload.append(
                 {
-                    "timestamp": row.ts.isoformat() if row.ts else None,
-                    "speed": row.speed_mps,
+                    "timestamp": ts.isoformat() if ts is not None else None,
+                    "speed": speed_kph,
                     "lat": row.lat,
                     "lon": row.lon,
                     "ax": row.ax,

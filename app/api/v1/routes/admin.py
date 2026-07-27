@@ -16,6 +16,16 @@ from app.services.admin_service import AdminService
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 
+@router.get("/trips", response_model=list[TripOut])
+def list_all_trips(
+    db: Session = Depends(get_db),
+    users: SqlUserRepository = Depends(get_users_repo),
+    user=Depends(get_current_user),
+):
+    service = AdminService(db, users)
+    return service.list_all_trips(actor=user)
+
+
 @router.get("/drivers", response_model=list[DriverSummaryOut])
 def list_drivers(
     db: Session = Depends(get_db),
@@ -46,6 +56,17 @@ def get_driver_insights(
 ):
     service = AdminService(db, users)
     return service.get_driver_insights(actor=user, driver_id=driver_id)
+
+
+@router.get("/trips/{trip_id}/route", response_model=TripRouteOut)
+def get_admin_trip_route(
+    trip_id: str,
+    db: Session = Depends(get_db),
+    users: SqlUserRepository = Depends(get_users_repo),
+    user=Depends(get_current_user),
+):
+    service = AdminService(db, users)
+    return service.get_trip_route(actor=user, trip_id=trip_id)
 
 
 @router.get("/drivers/{driver_id}/trips/{trip_id}/route", response_model=TripRouteOut)

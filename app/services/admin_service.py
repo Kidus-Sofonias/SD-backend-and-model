@@ -34,6 +34,12 @@ class AdminService:
         self._require_admin(actor)
         return self.users.list_drivers()
 
+    def list_all_trips(self, actor: UserRecord) -> list[Trip]:
+        """List ALL trips across all drivers (admin only)."""
+        self._require_admin(actor)
+        stmt = select(Trip).order_by(Trip.started_at.desc())
+        return self.db.execute(stmt).scalars().all()
+
     def _trip_anchor_timestamp(self, trip: Trip) -> datetime:
         candidate = trip.processed_at or trip.ended_at or trip.started_at
         if candidate.tzinfo is None:
@@ -297,6 +303,48 @@ class AdminService:
             email=email,
             password_hash=password_hash,
         )
+
+    def get_trip_route(self, actor: UserRecord, trip_id: str) -> dict:
+        """Get route for ANY trip (admin only, no driver_id needed)."""
+        self._require_admin(actor)
+
+        trip = self.db.execute(
+            select(Trip).where(Trip.id == trip_id)
+        ).scalar_one_or_none()
+        if trip is None:
+            raise NotFoundError(message_key="trip.not_found")
+
+        samples = self.db.execute(
+            select(SensorSample)
+            .where(
+                SensorSample.trip_id == trip_id,
+                SensorSample.lat.is_not(None),
+                SensorSample.lon.is_not(None),
+            )
+            .order_by(SensorSample.ts.asc())
+        ).scalars().all()
+
+        points = [
+            {
+                "ts": as_utc_timestamp(sample.ts),
+                "lat": float(sample.lat),
+                "lon": float(sample.lon),
+                "speed_mps": sample.speed_mps,
+                "accuracy_m": sample.accuracy_m,
+            }
+            for sample in samples
+        ]
+        snap_result = RouteSnapService().snap(points)
+
+        return {
+            "trip_id": trip.id,
+            "driver_user_id": trip.user_id,
+            "point_count": len(points),
+            "points": points,
+            "snapped_points": snap_result.snapped_points,
+            "snapped_source": snap_result.source,
+            "snapped_status": snap_result.status,
+        }
 
     def delete_driver(self, actor: UserRecord, driver_id: str) -> None:
         self._require_admin(actor)

@@ -71,8 +71,22 @@ def preprocess_samples(
     if missing:
         raise ValueError(f"Missing required fields: {missing}")
 
-    # Parse and sort timestamps
-    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+    # Parse timestamps one-by-one to avoid pandas choking on mixed formats
+    # (e.g. timestamps with/without microseconds or timezone info).
+    parsed: list[pd.Timestamp | pd.NaT] = []
+    for raw in df["timestamp"]:
+        try:
+            parsed.append(pd.Timestamp(raw))
+        except (ValueError, TypeError):
+            parsed.append(pd.NaT)
+    df["timestamp"] = parsed
+    if df["timestamp"].dt.tz is None:
+        # Assume UTC for naive timestamps
+        df["timestamp"] = df["timestamp"].dt.tz_localize("UTC")
+    else:
+        # Convert any timezone to UTC for consistency
+        df["timestamp"] = df["timestamp"].dt.tz_convert("UTC")
+
     df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
 
     if df.empty:

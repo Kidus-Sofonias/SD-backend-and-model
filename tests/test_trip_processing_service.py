@@ -50,12 +50,14 @@ def _seed_trip_with_samples(db: Session, dataset_name: str) -> tuple[str, str]:
     payload = json.loads(dataset_path.read_text(encoding="utf-8"))
 
     for sample in payload["samples"]:
+        # JSON test data has speed in km/h (legacy format); DB stores m/s
+        speed_mps = sample["speed"] / 3.6 if sample.get("speed") is not None else None
         db.add(
             SensorSample(
                 user_id=user_id,
                 trip_id=trip_id,
                 ts=datetime.fromisoformat(sample["timestamp"].replace("Z", "+00:00")),
-                speed_mps=sample["speed"],
+                speed_mps=speed_mps,
                 lat=sample.get("lat"),
                 lon=sample.get("lon"),
                 ax=sample.get("ax"),
