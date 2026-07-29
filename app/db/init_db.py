@@ -82,8 +82,18 @@ def _ensure_driving_event_columns() -> None:
             connection.execute(text("ALTER TABLE driving_events ADD COLUMN lon FLOAT"))
 
 
+def _ensure_sensor_sample_columns() -> None:
+    inspector = inspect(engine)
+    columns = {column["name"] for column in inspector.get_columns("sensor_samples")}
+
+    with engine.begin() as connection:
+        if "altitude_m" not in columns:
+            connection.execute(text("ALTER TABLE sensor_samples ADD COLUMN altitude_m FLOAT"))
+
+
 def init_db() -> None:
     Base.metadata.create_all(bind=engine)
     _ensure_user_role_column()
     _ensure_driving_event_columns()
+    _ensure_sensor_sample_columns()
     _seed_default_admin()

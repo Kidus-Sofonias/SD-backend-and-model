@@ -25,8 +25,10 @@ class Settings(BaseSettings):
         "http://localhost:19006,"
         "http://127.0.0.1:19006,"
         "http://localhost:3000,"
-        "http://127.0.0.1:3000"
+        "http://127.0.0.1:3000,"
+        "https://sd-driver-monitoring-frontend.onrender.com"
     )
+    # Override via env var CORS_ORIGINS_RAW on Render to add more origins.
 
     model_config = SettingsConfigDict(
         env_file=".env",
