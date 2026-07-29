@@ -7,20 +7,20 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class FeatureConfigV2:
     """
-    V2: Tuned for broader phone compatibility, higher sensitivity, and more samples.
+    V2: Tuned for broader phone compatibility, higher sensitivity, and real-world GPS behavior.
     
     Key changes from V1:
     - More sensitive to brake/accel events (lower thresholds)
     - More aggressive turn detection (lower gyro threshold)
-    - Tighter gap handling to reject sparse/sporadic data
+    - Relaxed max gap (10s) to accommodate real-world GPS update intervals
+    - Minimum 10 samples after gap filter to qualify for scoring
     - Slightly higher penalties for risky behaviors
-    - Lower minimum samples to score short trips
     """
     
     # data handling
-    max_gap_s: float = 2.5
+    max_gap_s: float = 10.0
     ema_alpha: float = 0.30
-    min_samples_for_scoring: int = 2
+    min_samples_for_scoring: int = 10
 
     # Speed is stored in m/s in the database (speed_mps column)
     input_speed_unit: str = "kmh"

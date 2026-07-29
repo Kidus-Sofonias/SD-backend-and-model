@@ -201,9 +201,9 @@ def test_finalize_trip_deletes_trip_when_samples_are_insufficient(tmp_path: Path
     assert events == []
 
 
-def test_finalize_trip_scores_trip_at_lowered_minimum_sample_threshold(tmp_path: Path) -> None:
+def test_finalize_trip_scores_trip_at_minimum_sample_threshold(tmp_path: Path) -> None:
     db = _make_session(tmp_path)
-    user_id, trip_id = _seed_trip_with_too_few_samples(db, sample_count=3)
+    user_id, trip_id = _seed_trip_with_too_few_samples(db, sample_count=12)
 
     result = TripProcessingService(db).finalize_trip(user_id=user_id, trip_id=trip_id, delete_raw=False)
 
