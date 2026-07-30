@@ -3,17 +3,22 @@
 # Key symbols/vars: router, upload_samples, list_samples.
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, get_current_user
+from app.db.init_db import ensure_sensor_sample_columns
 from app.schemas.sensor_samples import SensorSampleCountOut, SensorSamplesBatchIn, SensorSampleOut
 from app.repositories.sensor_sample_repository import SensorSampleRepository
 from app.repositories.trip_repository import SqlTripRepository
 from app.services.sensor_sample_service import SensorSampleService
+
+logger = logging.getLogger("app.routes.sensor_samples")
 
 router = APIRouter()
 
@@ -31,7 +36,22 @@ def upload_samples(
     )
 
     rows = [s.model_dump() for s in payload.samples]
-    inserted = service.add_samples(user_id=user.id, trip_id=trip_id, samples=rows)
+
+    # Defensively ensure the sensor_samples table has all required columns.
+    # This catches cases where a migration was not applied on the production database.
+    try:
+        inserted = service.add_samples(user_id=user.id, trip_id=trip_id, samples=rows)
+    except ProgrammingError as exc:
+        logger.warning(
+            "Sample insert failed with ProgrammingError — ensuring sensor_samples schema and retrying. Error: %s",
+            exc,
+        )
+        # The _ensure call runs on the raw engine, outside the current transaction.
+        # Rollback the failed transaction before trying again.
+        db.rollback()
+        ensure_sensor_sample_columns()
+        inserted = service.add_samples(user_id=user.id, trip_id=trip_id, samples=rows)
+
     return {"inserted": inserted}
 
 
