@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import logging
+import traceback
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -25,6 +27,7 @@ router = APIRouter()
 
 @router.post("/{trip_id}/samples")
 def upload_samples(
+    request: Request,
     trip_id: str,
     payload: SensorSamplesBatchIn,
     db: Session = Depends(get_db),
@@ -37,42 +40,51 @@ def upload_samples(
 
     rows = [s.model_dump() for s in payload.samples]
 
-    # Defensively handle DB errors. This catches:
-    # - ProgrammingError (missing columns, schema mismatch)
-    # - IntegrityError (constraint violations)
-    # - OperationalError (connection issues)
-    # - DataError (type mismatch)
     try:
         inserted = service.add_samples(user_id=user.id, trip_id=trip_id, samples=rows)
-    except SQLAlchemyError as exc:
+        return {"inserted": inserted}
+    except Exception as exc:
+        is_sqla = isinstance(exc, SQLAlchemyError)
         logger.error(
-            "Sample insert failed: type=%s message=%s",
+            "Sample insert failed: type=%s is_db=%s message=%s\n%s",
             type(exc).__name__,
+            is_sqla,
             str(exc),
+            traceback.format_exc(),
             extra={"trip_id": trip_id, "user_id": user.id, "sample_count": len(rows)},
         )
-        # Rollback the failed transaction before any recovery attempt
         db.rollback()
-        # Try to fix missing columns (common issue on production DBs)
-        try:
-            ensure_sensor_sample_columns()
-            inserted = service.add_samples(user_id=user.id, trip_id=trip_id, samples=rows)
-            return {"inserted": inserted}
-        except SQLAlchemyError as retry_exc:
-            logger.error(
-                "Sample insert retry also failed: type=%s message=%s",
-                type(retry_exc).__name__,
-                str(retry_exc),
-            )
-            raise HTTPException(
-                status_code=500,
-                detail={
-                    "message": "Failed to save sensor samples",
-                    "original_error": str(exc),
-                },
-            ) from retry_exc
 
-    return {"inserted": inserted}
+        # For DB-level errors, try to fix missing columns and retry once
+        if is_sqla:
+            try:
+                ensure_sensor_sample_columns()
+                inserted = service.add_samples(user_id=user.id, trip_id=trip_id, samples=rows)
+                return {"inserted": inserted}
+            except Exception as retry_exc:
+                logger.error(
+                    "Sample insert retry failed: type=%s message=%s\n%s",
+                    type(retry_exc).__name__,
+                    str(retry_exc),
+                    traceback.format_exc(),
+                )
+
+        # Return a structured JSON response so the error detail reaches the
+        # frontend (the generic http_exception_handler strips it).
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "error": {
+                    "message_key": "error.sample_upload",
+                    "details": {
+                        "error_type": type(exc).__name__,
+                        "error_message": str(exc)[:500],
+                    },
+                },
+                "request_id": getattr(request.state, "request_id", None),
+            },
+        )
 
 
 @router.get("/{trip_id}/samples", response_model=list[SensorSampleOut])
