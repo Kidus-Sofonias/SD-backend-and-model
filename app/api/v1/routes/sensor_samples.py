@@ -7,8 +7,8 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query
-from sqlalchemy.exc import ProgrammingError
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, get_current_user
@@ -37,20 +37,40 @@ def upload_samples(
 
     rows = [s.model_dump() for s in payload.samples]
 
-    # Defensively ensure the sensor_samples table has all required columns.
-    # This catches cases where a migration was not applied on the production database.
+    # Defensively handle DB errors. This catches:
+    # - ProgrammingError (missing columns, schema mismatch)
+    # - IntegrityError (constraint violations)
+    # - OperationalError (connection issues)
+    # - DataError (type mismatch)
     try:
         inserted = service.add_samples(user_id=user.id, trip_id=trip_id, samples=rows)
-    except ProgrammingError as exc:
-        logger.warning(
-            "Sample insert failed with ProgrammingError — ensuring sensor_samples schema and retrying. Error: %s",
-            exc,
+    except SQLAlchemyError as exc:
+        logger.error(
+            "Sample insert failed: type=%s message=%s",
+            type(exc).__name__,
+            str(exc),
+            extra={"trip_id": trip_id, "user_id": user.id, "sample_count": len(rows)},
         )
-        # The _ensure call runs on the raw engine, outside the current transaction.
-        # Rollback the failed transaction before trying again.
+        # Rollback the failed transaction before any recovery attempt
         db.rollback()
-        ensure_sensor_sample_columns()
-        inserted = service.add_samples(user_id=user.id, trip_id=trip_id, samples=rows)
+        # Try to fix missing columns (common issue on production DBs)
+        try:
+            ensure_sensor_sample_columns()
+            inserted = service.add_samples(user_id=user.id, trip_id=trip_id, samples=rows)
+            return {"inserted": inserted}
+        except SQLAlchemyError as retry_exc:
+            logger.error(
+                "Sample insert retry also failed: type=%s message=%s",
+                type(retry_exc).__name__,
+                str(retry_exc),
+            )
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "message": "Failed to save sensor samples",
+                    "original_error": str(exc),
+                },
+            ) from retry_exc
 
     return {"inserted": inserted}
 

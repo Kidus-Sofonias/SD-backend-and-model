@@ -1,6 +1,6 @@
 [project]
 name = "safe-driving-backend"
-version = "0.1.0"
+version = "0.2.0"
 description = "Safe Driving Super App Backend (FastAPI)"
 requires-python = ">=3.11"
 dependencies = [
