@@ -91,35 +91,44 @@ def ensure_sensor_sample_columns() -> None:
             connection.execute(text("ALTER TABLE sensor_samples ADD COLUMN altitude_m FLOAT"))
 
 
-def ensure_sensor_sample_id_sequence() -> None:
-    """Resync the sensor_samples primary-key sequence after explicit-ID imports.
+def _resync_table_id_sequence(table_name: str) -> None:
+    """Resync a table's primary-key sequence after explicit-ID imports.
 
-    migrate_to_supabase.py deletes all sensor_samples and re-inserts them with
-    explicit IDs. Explicit-ID inserts do NOT advance the Postgres sequence, so
-    the next auto-generated id can collide with an existing row
-    (UniqueViolation on sensor_samples_pkey). This resets the sequence to
-    MAX(id)+1 so future auto-increment ids never collide. No-op on SQLite.
+    migrate_to_supabase.py re-inserts rows with explicit IDs. Explicit-ID
+    inserts do NOT advance the Postgres sequence, so the next auto-generated id
+    can collide with an existing row (UniqueViolation on the primary key). This
+    resets the sequence to MAX(id)+1 so future auto-increment ids never collide.
+    No-op on SQLite.
     """
     if not settings.database_url.startswith("postgresql"):
         return
 
     inspector = inspect(engine)
-    if "sensor_samples" not in inspector.get_table_names():
+    if table_name not in inspector.get_table_names():
         return
 
     with engine.begin() as connection:
         seq = connection.execute(
-            text("SELECT pg_get_serial_sequence('sensor_samples', 'id')")
+            text("SELECT pg_get_serial_sequence(:tbl, 'id')"),
+            {"tbl": table_name},
         ).scalar()
         if not seq:
             return
         connection.execute(
             text(
                 "SELECT setval(:seq, "
-                "COALESCE((SELECT MAX(id) FROM sensor_samples), 0) + 1, false)"
+                f"COALESCE((SELECT MAX(id) FROM {table_name}), 0) + 1, false)"
             ),
             {"seq": seq},
         )
+
+
+def ensure_sensor_sample_id_sequence() -> None:
+    _resync_table_id_sequence("sensor_samples")
+
+
+def ensure_driving_event_id_sequence() -> None:
+    _resync_table_id_sequence("driving_events")
 
 
 _ensure_sensor_sample_columns = ensure_sensor_sample_columns
@@ -131,4 +140,5 @@ def init_db() -> None:
     _ensure_driving_event_columns()
     _ensure_sensor_sample_columns()
     ensure_sensor_sample_id_sequence()
+    ensure_driving_event_id_sequence()
     _seed_default_admin()

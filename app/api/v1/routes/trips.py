@@ -17,12 +17,18 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+import logging
+import traceback
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.core.utils import as_utc_timestamp
+from app.db.init_db import ensure_driving_event_id_sequence, ensure_sensor_sample_id_sequence
 from app.db.models.trip import Trip
 from app.db.session import get_db
 from app.repositories.sensor_sample_repository import SensorSampleRepository
@@ -41,6 +47,80 @@ from app.services.trip_processing_service import TripProcessingService
 from app.services.route_snap_service import RouteSnapService
 
 router = APIRouter(prefix="/trips", tags=["trips"])
+
+logger = logging.getLogger("app.routes.trips")
+
+
+def _run_finalize_with_recovery(
+    request: Request,
+    service: TripProcessingService,
+    *,
+    user_id: str,
+    trip_id: str,
+    delete_raw: bool,
+    force_reprocess: bool,
+):
+    """Run trip finalization, self-healing the Postgres id sequences on
+    SQLAlchemy errors (explicit-ID migrations desync sequences, causing
+    UniqueViolation on generated DrivingEvent/sample rows), then retry once.
+    Returns a structured JSON error on failure so the client sees the real
+    error instead of a generic error.internal_server.
+    """
+    try:
+        return service.finalize_trip(
+            user_id=user_id,
+            trip_id=trip_id,
+            delete_raw=delete_raw,
+            force_reprocess=force_reprocess,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        is_sqla = isinstance(exc, SQLAlchemyError)
+        logger.error(
+            "Trip finalize failed: type=%s is_db=%s message=%s\n%s",
+            type(exc).__name__,
+            is_sqla,
+            str(exc),
+            traceback.format_exc(),
+            extra={"trip_id": trip_id, "user_id": user_id},
+        )
+        service.db.rollback()
+
+        reported_exc = exc
+        if is_sqla:
+            try:
+                ensure_sensor_sample_id_sequence()
+                ensure_driving_event_id_sequence()
+                return service.finalize_trip(
+                    user_id=user_id,
+                    trip_id=trip_id,
+                    delete_raw=delete_raw,
+                    force_reprocess=force_reprocess,
+                )
+            except Exception as retry_exc:
+                logger.error(
+                    "Trip finalize retry failed: type=%s message=%s\n%s",
+                    type(retry_exc).__name__,
+                    str(retry_exc),
+                    traceback.format_exc(),
+                )
+                reported_exc = retry_exc
+
+        return JSONResponse(
+            status_code=500,
+            content={
+                "ok": False,
+                "error": {
+                    "message_key": "error.trip_finalize",
+                    "details": {
+                        "error_type": type(reported_exc).__name__,
+                        "error_message": str(reported_exc)[:500],
+                    },
+                },
+                "request_id": getattr(request.state, "request_id", None),
+            },
+        )
 
 
 @router.get("/active", response_model=TripOut | None)
@@ -157,6 +237,7 @@ def trip_summary(
 
 @router.post("/{trip_id}/finalize", response_model=FinalizeTripOut)
 def finalize_trip(
+    request: Request,
     trip_id: str,
     delete_raw: bool = False,
     force_reprocess: bool = False,
@@ -165,34 +246,33 @@ def finalize_trip(
 ):
     service = TripProcessingService(db)
 
-    try:
-        return service.finalize_trip(
-            user_id=user.id,
-            trip_id=trip_id,
-            delete_raw=delete_raw,
-            force_reprocess=force_reprocess,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _run_finalize_with_recovery(
+        request,
+        service,
+        user_id=user.id,
+        trip_id=trip_id,
+        delete_raw=delete_raw,
+        force_reprocess=force_reprocess,
+    )
 
 
 @router.post("/{trip_id}/reprocess", response_model=FinalizeTripOut)
 def reprocess_trip(
+    request: Request,
     trip_id: str,
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
     service = TripProcessingService(db)
 
-    try:
-        return service.finalize_trip(
-            user_id=user.id,
-            trip_id=trip_id,
-            delete_raw=False,
-            force_reprocess=True,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _run_finalize_with_recovery(
+        request,
+        service,
+        user_id=user.id,
+        trip_id=trip_id,
+        delete_raw=False,
+        force_reprocess=True,
+    )
 
 
 @router.post("/reprocess", response_model=ReprocessTripsOut)
