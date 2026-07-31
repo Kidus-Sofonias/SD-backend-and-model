@@ -18,7 +18,11 @@ class SensorSampleRepository:
         self.db = db
 
     def create_many(self, *, user_id: str, trip_id: str, rows: List[dict]) -> int:
-        objs = [SensorSample(user_id=user_id, trip_id=trip_id, **row) for row in rows]
+        # Never trust a client-supplied id — the server owns the primary key.
+        # The schema already drops it, but this guards against any future payload
+        # changes and prevents UniqueViolation collisions from stale ids.
+        clean_rows = [{k: v for k, v in row.items() if k != "id"} for row in rows]
+        objs = [SensorSample(user_id=user_id, trip_id=trip_id, **row) for row in clean_rows]
         self.db.add_all(objs)
         commit_with_retry(self.db)
         return len(objs)

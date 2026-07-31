@@ -14,7 +14,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, get_current_user
-from app.db.init_db import ensure_sensor_sample_columns
+from app.db.init_db import ensure_sensor_sample_columns, ensure_sensor_sample_id_sequence
 from app.schemas.sensor_samples import SensorSampleCountOut, SensorSamplesBatchIn, SensorSampleOut
 from app.repositories.sensor_sample_repository import SensorSampleRepository
 from app.repositories.trip_repository import SqlTripRepository
@@ -55,10 +55,14 @@ def upload_samples(
         )
         db.rollback()
 
-        # For DB-level errors, try to fix missing columns and retry once
+        # For DB-level errors, try to fix missing columns and resync the id
+        # sequence (explicit-ID imports desync the Postgres sequence, which
+        # causes UniqueViolation on the primary key for every subsequent insert),
+        # then retry once.
         if is_sqla:
             try:
                 ensure_sensor_sample_columns()
+                ensure_sensor_sample_id_sequence()
                 inserted = service.add_samples(user_id=user.id, trip_id=trip_id, samples=rows)
                 return {"inserted": inserted}
             except Exception as retry_exc:

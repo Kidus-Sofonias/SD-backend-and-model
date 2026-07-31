@@ -105,6 +105,18 @@ while offset < total:
         log(f"  sensor_samples: {min(offset,total)}/{total}")
 log("sensor_samples done!")
 
+# Resync id sequences after explicit-ID inserts so auto-increment never collides
+log("Resyncing id sequences...")
+with pg.begin() as c:
+    for table in ["sensor_samples", "driving_events"]:
+        seq = c.execute(text(f"SELECT pg_get_serial_sequence('{table}', 'id')")).scalar()
+        if seq:
+            c.execute(
+                text(f"SELECT setval(:seq, COALESCE((SELECT MAX(id) FROM {table}), 0) + 1, false)"),
+                {"seq": seq},
+            )
+log("Sequences resynced")
+
 # Verify
 log("Verifying counts...")
 with sq.connect() as sc, pg.connect() as pc:
