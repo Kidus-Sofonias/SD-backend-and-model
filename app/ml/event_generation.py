@@ -17,7 +17,8 @@ import pandas as pd
 from .braking import classify_brake_segment
 from .event_utils import event_segments
 
-UNSTABLE_MOTION_JERK_THRESHOLD = 0.12
+UNSTABLE_MOTION_JERK_THRESHOLD = 2.5
+
 
 def _isoformat_timestamp(value: object) -> str | None:
     if value is None:
@@ -75,11 +76,21 @@ def generate_trip_events(
     emergency_brake_dv: float,
     emergency_brake_min_speed_mps: float,
     aggressive_turn_threshold: float,
+    turn_min_duration_s: float,
     min_event_duration_s: float,
     merge_gap_s: float,
+    unstable_motion_jerk_threshold: float,
+    overspeed_threshold_mps: float,
+    overspeed_min_duration_s: float,
+    severe_overspeed_threshold_mps: float,
+    severe_overspeed_min_duration_s: float,
 ) -> list[dict]:
     """
     Build persisted driving-event instances with their own timestamps and coordinates.
+
+    Phase 3: detection uses the raw-signal columns produced by
+    compute_per_sample_features (dv from raw speed, lateral_accel, jerk_mag_raw)
+    and adds the overspeed categories.
     """
     if per.empty or not trip_features:
         return []
@@ -87,8 +98,9 @@ def generate_trip_events(
     t = per["t"].to_numpy()
     dv = per["dv"].to_numpy()
     speed = per["speed_s"].to_numpy()
-    turn = per["turn_intensity"].to_numpy()
-    jerk = per["jerk_mag"].to_numpy()
+    speed_raw = per["speed"].to_numpy(dtype=float)
+    lateral = per["lateral_accel"].to_numpy()
+    jerk_raw = per["jerk_mag_raw"].to_numpy()
 
     events: list[dict] = []
 
@@ -124,37 +136,68 @@ def generate_trip_events(
             )
         )
 
-    aggressive_turn_segments = event_segments(turn > aggressive_turn_threshold, t, min_event_duration_s, merge_gap_s)
+    aggressive_turn_segments = event_segments(lateral > aggressive_turn_threshold, t, turn_min_duration_s, merge_gap_s)
     for start, end in aggressive_turn_segments:
-        peak_idx = _peak_index(turn, start, end, mode="max")
+        peak_idx = _peak_index(lateral, start, end, mode="max")
         events.append(
             _build_event_payload(
                 per,
                 index=peak_idx,
                 event_type="aggressive_turn",
-                value=float(turn[peak_idx]),
+                value=float(lateral[peak_idx]),
             )
         )
 
-    unstable_motion_segments = event_segments(jerk >= UNSTABLE_MOTION_JERK_THRESHOLD, t, min_event_duration_s, merge_gap_s)
+    unstable_motion_segments = event_segments(
+        jerk_raw >= unstable_motion_jerk_threshold,
+        t,
+        min_event_duration_s,
+        merge_gap_s,
+    )
     for start, end in unstable_motion_segments:
-        peak_idx = _peak_index(jerk, start, end, mode="max")
+        peak_idx = _peak_index(jerk_raw, start, end, mode="max")
         events.append(
             _build_event_payload(
                 per,
                 index=peak_idx,
                 event_type="unstable_motion",
-                value=float(jerk[peak_idx]),
+                value=float(jerk_raw[peak_idx]),
             )
         )
 
-    # NOTE: the former speed_variation category was removed in Phase 2. Its
-    # |dv| >= 2.25 m/s^2 window overlapped the brake/accel thresholds (2.5 m/s^2)
-    # so nearly every event was a duplicate of a hard brake or hard acceleration
-    # (a hard brake appeared twice in the persisted event list). Speed variability
-    # remains captured by the speed_variance trip feature used in scoring.
-    # Phase 3 reintroduces a dedicated overspeed/speed-variation category with
-    # non-overlapping semantics.
+    overspeed_segments = event_segments(
+        speed_raw >= overspeed_threshold_mps,
+        t,
+        overspeed_min_duration_s,
+        merge_gap_s,
+    )
+    for start, end in overspeed_segments:
+        peak_idx = _peak_index(speed_raw, start, end, mode="max")
+        events.append(
+            _build_event_payload(
+                per,
+                index=peak_idx,
+                event_type="overspeed",
+                value=float(speed_raw[peak_idx]),
+            )
+        )
+
+    severe_overspeed_segments = event_segments(
+        speed_raw >= severe_overspeed_threshold_mps,
+        t,
+        severe_overspeed_min_duration_s,
+        merge_gap_s,
+    )
+    for start, end in severe_overspeed_segments:
+        peak_idx = _peak_index(speed_raw, start, end, mode="max")
+        events.append(
+            _build_event_payload(
+                per,
+                index=peak_idx,
+                event_type="severe_overspeed",
+                value=float(speed_raw[peak_idx]),
+            )
+        )
 
     events.sort(key=lambda item: (item.get("occurred_at") or "", item["event_type"]))
     return events
@@ -174,17 +217,10 @@ def build_human_reasons(
         return ["Not enough usable trip data"]
 
     emergency_brake_count = int(trip_features.get("emergency_brake_count", 0))
-    chargeable_hard_brake_count = int(
-        trip_features.get(
-            "chargeable_hard_brake_count",
-            max(0, int(trip_features.get("harsh_brake_count", 0)) - emergency_brake_count),
-        )
-    )
+    chargeable_hard_brake_count = int(trip_features.get("chargeable_hard_brake_count", 0))
 
     if emergency_brake_count > 0:
-        reasons.append(
-            f"Emergency braking detected ({emergency_brake_count}); treated as an emergency safety response"
-        )
+        reasons.append(f"Emergency braking detected ({emergency_brake_count})")
 
     if chargeable_hard_brake_count > 0:
         reasons.append(f"Hard braking detected ({chargeable_hard_brake_count})")
@@ -194,6 +230,15 @@ def build_human_reasons(
 
     if int(trip_features.get("aggressive_turn_count", 0)) > 0:
         reasons.append(f"Aggressive turning detected ({trip_features['aggressive_turn_count']})")
+
+    if int(trip_features.get("overspeed_count", 0)) > 0:
+        reasons.append(f"Overspeeding detected ({trip_features['overspeed_count']})")
+
+    if int(trip_features.get("severe_overspeed_count", 0)) > 0:
+        reasons.append(f"Severe overspeeding detected ({trip_features['severe_overspeed_count']})")
+
+    if int(trip_features.get("unstable_motion_count", 0)) > 0:
+        reasons.append(f"Rough road / unstable motion detected ({trip_features['unstable_motion_count']})")
 
     if float(trip_features.get("p95_jerk", 0.0)) >= UNSTABLE_MOTION_JERK_THRESHOLD:
         reasons.append("Trip motion was not smooth")

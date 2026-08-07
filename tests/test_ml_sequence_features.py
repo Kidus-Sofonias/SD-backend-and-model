@@ -71,12 +71,18 @@ def _features(speeds: list[float], *, ax_noise: float = 0.1) -> dict:
     return aggregate_trip_features(
         df,
         aggressive_turn_threshold=cfg.aggressive_turn_threshold,
+        turn_min_duration_s=cfg.turn_min_duration_s,
         harsh_brake_dv=cfg.harsh_brake_dv,
         harsh_accel_dv=cfg.harsh_accel_dv,
         emergency_brake_dv=cfg.emergency_brake_dv,
         emergency_brake_min_speed_mps=cfg.emergency_brake_min_speed_mps,
         min_event_duration_s=cfg.min_event_duration_s,
         merge_gap_s=cfg.merge_gap_s,
+        unstable_motion_jerk_threshold=cfg.unstable_motion_jerk_threshold,
+        overspeed_threshold_mps=cfg.overspeed_threshold_mps,
+        overspeed_min_duration_s=cfg.overspeed_min_duration_s,
+        severe_overspeed_threshold_mps=cfg.severe_overspeed_threshold_mps,
+        severe_overspeed_min_duration_s=cfg.severe_overspeed_min_duration_s,
     )
 
 

@@ -126,12 +126,17 @@ def adaptive_ml_blend_weight(
 
 
 class TripProcessingService:
+    # Note: "speed_variation" is intentionally retained in this set (Phase 2/3)
+    # so reprocessing deletes stale pre-Phase-2 rows even though the generator no
+    # longer produces them.
     GENERATED_EVENT_TYPES = {
         "hard_brake",
         "emergency_brake",
         "hard_accel",
         "aggressive_turn",
         "unstable_motion",
+        "overspeed",
+        "severe_overspeed",
         "speed_variation",
     }
 
@@ -288,11 +293,13 @@ class TripProcessingService:
         )
 
     def _risk_level_from_score(self, score: int | None) -> str | None:
+        # Phase 3 bands calibrated for the v2 scoring model: >=85 low,
+        # 65-84 medium, <65 high.
         if score is None:
             return None
-        if score >= 80:
+        if score >= 85:
             return "low"
-        if score >= 55:
+        if score >= 65:
             return "medium"
         return "high"
 

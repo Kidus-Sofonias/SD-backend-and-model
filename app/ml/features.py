@@ -47,16 +47,22 @@ def _segment_durations(
 def compute_per_sample_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     Add derived per-sample features used later for event detection and trip aggregation.
+
+    Phase 3: detection signals are computed on RAW (unsmoothed) inputs where the
+    old code used the EMA-smoothed stream. EMA (alpha=0.3) attenuated real braking
+    peaks by ~50-70%, hiding genuine events; raw signals keep them visible. The
+    smoothed streams remain the basis for trip-level model features (p95_jerk, ...)
+    so the existing model inputs stay consistent.
     """
     out = df.copy()
 
-    # Acceleration magnitude
+    # Acceleration magnitude (smoothed inputs -> model features)
     out["a_mag"] = np.sqrt(out["ax_s"] ** 2 + out["ay_s"] ** 2 + out["az_s"] ** 2)
 
     # Gyroscope magnitude
     out["g_mag"] = np.sqrt(out["gx_s"] ** 2 + out["gy_s"] ** 2 + out["gz_s"] ** 2)
 
-    # Jerk = change in acceleration magnitude over time
+    # Jerk = change in acceleration magnitude over time (smoothed inputs)
     out["jerk"] = 0.0
     if len(out) > 1:
         out.loc[1:, "jerk"] = (
@@ -65,19 +71,59 @@ def compute_per_sample_features(df: pd.DataFrame) -> pd.DataFrame:
         )
     out["jerk_mag"] = np.abs(out["jerk"])
 
-    # dv = change in speed over time
+    # Raw jerk magnitude (unsmoothed) for rough-road / unstable-motion detection.
+    # The old unstable_motion floor (0.12 m/s^3 on smoothed jerk) fired 20+ times
+    # per trip on ordinary road noise; raw jerk with a 2.5 m/s^3 floor is a real
+    # rough-road signal.
+    jerk_raw = np.zeros(len(out))
+    if len(out) > 1:
+        a_raw = np.sqrt(
+            out["ax"].to_numpy(dtype=float) ** 2
+            + out["ay"].to_numpy(dtype=float) ** 2
+            + out["az"].to_numpy(dtype=float) ** 2
+        )
+        jerk_raw[1:] = (a_raw[1:] - a_raw[:-1]) / np.maximum(out["dt"].iloc[1:].to_numpy(), 1e-6)
+    out["jerk_mag_raw"] = np.abs(jerk_raw)
+
+    # Longitudinal acceleration from RAW speed (primary braking/accel detection
+    # signal; GPS speed quantization noise ~0.3 m/s^2 is far below thresholds).
+    #
+    # Zero-speed guard: some devices report 0 m/s when the GPS speed fix is
+    # unavailable. A genuine stop keeps speed at 0 for several consecutive
+    # samples; an isolated 0 (or a 0->moving recovery in < 3 samples) is a
+    # measurement artifact that would otherwise look like a ~1.4 g deceleration.
+    # Such samples are treated as invalid (NaN) so they never produce events.
+    speed_raw = out["speed"].to_numpy(dtype=float).astype(float)
+    zero_mask = speed_raw == 0.0
+    # Label each zero sample with the length of the contiguous zero-run it belongs
+    # to. A run of >= 3 consecutive zeros is a genuine stop; shorter runs are
+    # measurement artifacts (missing GPS speed reported as 0) and are treated as
+    # invalid so they can never generate events.
+    zero_run_len = np.zeros(len(speed_raw), dtype=int)
+    zero_indices = np.flatnonzero(zero_mask)
+    if len(zero_indices):
+        boundaries = np.flatnonzero(np.diff(zero_indices) > 1) + 1
+        for group in np.split(zero_indices, boundaries):
+            if len(group):
+                zero_run_len[group] = len(group)
+    invalid_speed = zero_mask & (zero_run_len < 3)
+    speed_clean = np.where(invalid_speed, np.nan, speed_raw)
+
     out["dv"] = 0.0
     if len(out) > 1:
-        out.loc[1:, "dv"] = (
-            (out["speed_s"].iloc[1:].to_numpy() - out["speed_s"].iloc[:-1].to_numpy())
-            / np.maximum(out["dt"].iloc[1:].to_numpy(), 1e-6)
-        )
+        dv = (speed_clean[1:] - speed_clean[:-1]) / np.maximum(out["dt"].iloc[1:].to_numpy(), 1e-6)
+        # Clip to physically plausible bounds (~1.2 g): larger values are data
+        # artifacts, not vehicle motion.
+        dv = np.clip(dv, -11.8, 11.8)
+        out.loc[1:, "dv"] = dv
 
-    # Turning proxy: absolute smoothed z-gyro
-    out["turn_intensity"] = np.abs(out["gz_s"])
+    # Lateral acceleration proxy = speed * |yaw-rate| (~v * omega_z). This
+    # replaces the old raw |gz| >= 2.0 rad/s test, which required unrealistically
+    # violent rotations and essentially never fired on real trips. With speed in
+    # the formula, a normal turn at speed produces meaningful lateral g.
+    out["lateral_accel"] = np.abs(out["speed_s"].to_numpy(dtype=float)) * np.abs(out["gz_s"].to_numpy(dtype=float))
 
     return out
-
 
 
 def aggregate_trip_features(
@@ -87,8 +133,14 @@ def aggregate_trip_features(
     emergency_brake_dv: float,
     emergency_brake_min_speed_mps: float,
     aggressive_turn_threshold: float,
+    turn_min_duration_s: float,
     min_event_duration_s: float,
     merge_gap_s: float,
+    unstable_motion_jerk_threshold: float,
+    overspeed_threshold_mps: float,
+    overspeed_min_duration_s: float,
+    severe_overspeed_threshold_mps: float,
+    severe_overspeed_min_duration_s: float,
 ) -> dict:
     """
     Aggregate per-sample features into one training/inference row per trip.
@@ -98,23 +150,34 @@ def aggregate_trip_features(
 
     t = per["t"].to_numpy()
     speed = per["speed_s"].to_numpy()
+    speed_raw = per["speed"].to_numpy(dtype=float)
     dt = per["dt"].to_numpy()
+    dv = per["dv"].to_numpy()
 
-    harsh_brake_mask = per["dv"].to_numpy() < harsh_brake_dv
-    harsh_accel_mask = per["dv"].to_numpy() > harsh_accel_dv
-    aggressive_turn_mask = per["turn_intensity"].to_numpy() > aggressive_turn_threshold
-    harsh_brake_segments = event_segments(
-        harsh_brake_mask,
-        t,
-        min_event_duration_s,
-        merge_gap_s,
-    )
+    harsh_brake_mask = dv < harsh_brake_dv
+    harsh_accel_mask = dv > harsh_accel_dv
+    aggressive_turn_mask = per["lateral_accel"].to_numpy() > aggressive_turn_threshold
+    unstable_motion_mask = per["jerk_mag_raw"].to_numpy() >= unstable_motion_jerk_threshold
+    # Overspeed uses RAW speed (the EMA-smoothed stream lags behind the limit
+    # and would undercount sustained high-speed stretches).
+    overspeed_mask = speed_raw >= overspeed_threshold_mps
+    severe_overspeed_mask = speed_raw >= severe_overspeed_threshold_mps
+
+    harsh_brake_segments = event_segments(harsh_brake_mask, t, min_event_duration_s, merge_gap_s)
     harsh_accel_segments = event_segments(harsh_accel_mask, t, min_event_duration_s, merge_gap_s)
-    aggressive_turn_segments = event_segments(aggressive_turn_mask, t, min_event_duration_s, merge_gap_s)
+    # Turns need to be sustained (turn_min_duration_s) so single-sample gyro
+    # noise spikes do not count as aggressive cornering.
+    aggressive_turn_segments = event_segments(aggressive_turn_mask, t, turn_min_duration_s, merge_gap_s)
+    unstable_motion_segments = event_segments(unstable_motion_mask, t, min_event_duration_s, merge_gap_s)
+    overspeed_segments = event_segments(overspeed_mask, t, overspeed_min_duration_s, merge_gap_s)
+    severe_overspeed_segments = event_segments(severe_overspeed_mask, t, severe_overspeed_min_duration_s, merge_gap_s)
 
     harsh_brake_count = len(harsh_brake_segments)
     harsh_accel_count = len(harsh_accel_segments)
     aggressive_turn_count = len(aggressive_turn_segments)
+    unstable_motion_count = len(unstable_motion_segments)
+    overspeed_count = len(overspeed_segments)
+    severe_overspeed_count = len(severe_overspeed_segments)
 
     # --- Sequence-based features (signal the rule scorer does not use) ---
     event_durations = (
@@ -125,7 +188,7 @@ def aggregate_trip_features(
     mean_event_duration_s = float(np.mean(event_durations)) if event_durations else 0.0
     max_event_duration_s = float(np.max(event_durations)) if event_durations else 0.0
 
-    # Longest contiguous run where ANY event condition held — the worst sustained incident.
+    # Longest contiguous run where ANY longitudinal/lateral event condition held.
     any_event_segments = event_segments(
         harsh_brake_mask | harsh_accel_mask | aggressive_turn_mask,
         t,
@@ -144,7 +207,7 @@ def aggregate_trip_features(
         1
         for start, end in harsh_brake_segments
         if classify_brake_segment(
-            per["dv"].to_numpy(),
+            dv,
             speed,
             start,
             end,
@@ -171,9 +234,20 @@ def aggregate_trip_features(
         confidence -= 0.25
     confidence = float(max(0.0, min(1.0, confidence)))
 
-    # NaN-safe aggregation: preprocessing guarantees finite speed/IMU values, but
-    # keeping the aggregations NaN-proof protects scoring/model inference from any
-    # future data path that slips through non-finite values (CRIT-2).
+    # Exposure normalization for scoring: events per hour (floor duration at 1 min
+    # so very short trips do not produce absurd per-hour rates).
+    total_chargeable_events = int(
+        emergency_brake_count
+        + chargeable_hard_brake_count
+        + harsh_accel_count
+        + aggressive_turn_count
+        + overspeed_count
+        + severe_overspeed_count
+        + unstable_motion_count
+    )
+    hours = max(duration_s, 60.0) / 3600.0
+    events_per_hour = float(total_chargeable_events / hours)
+
     return {
         "duration_s": duration_s,
         "n_samples": int(len(per)),
@@ -189,6 +263,11 @@ def aggregate_trip_features(
         "chargeable_hard_brake_count": int(chargeable_hard_brake_count),
         "harsh_accel_count": harsh_accel_count,
         "aggressive_turn_count": aggressive_turn_count,
+        "unstable_motion_count": unstable_motion_count,
+        "overspeed_count": overspeed_count,
+        "severe_overspeed_count": severe_overspeed_count,
+        "total_chargeable_events": total_chargeable_events,
+        "events_per_hour": events_per_hour,
         "confidence": confidence,
         "jerk_entropy": jerk_entropy,
         "mean_event_duration_s": mean_event_duration_s,
