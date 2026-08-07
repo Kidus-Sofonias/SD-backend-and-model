@@ -225,6 +225,22 @@ class LiveAlertDetector:
         with self._lock:
             return list(self._recent.get(trip_id, []))
 
+    def event_counts(self, trip_id: str) -> Dict[str, int]:
+        """Aggregate live-detected event counters per event type for a trip.
+
+        Counts every event the detector has flagged this process lifetime (the
+        in-memory alerted set), including events seeded from persisted rows.
+        Used by the live telemetry endpoint for glance/details modes.
+        """
+        with self._lock:
+            # Copy the set so we never iterate a shared set that a concurrent
+            # upload may be mutating (process_upload adds keys under the lock).
+            alerted = set(self._alerted.get(trip_id, ()))
+        counts: Dict[str, int] = {}
+        for event_type, _occurred_at in alerted:
+            counts[event_type] = counts.get(event_type, 0) + 1
+        return counts
+
     def clear_trip(self, trip_id: str) -> None:
         with self._lock:
             self._windows.pop(trip_id, None)

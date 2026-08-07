@@ -52,6 +52,25 @@ class SensorSampleRepository:
         )
         return int(self.db.execute(stmt).scalar_one())
 
+    def list_latest_by_trip(
+        self,
+        *,
+        user_id: str,
+        trip_id: str,
+        limit: int = 5,
+    ) -> list[SensorSample]:
+        """Return the most recent samples for a trip (newest first)."""
+        stmt = (
+            select(SensorSample)
+            .where(
+                SensorSample.trip_id == trip_id,
+                SensorSample.user_id == user_id,
+            )
+            .order_by(SensorSample.ts.desc())
+            .limit(limit)
+        )
+        return list(self.db.execute(stmt).scalars().all())
+
     def list_route_points_by_trip(self, *, user_id: str, trip_id: str) -> list[SensorSample]:
         stmt = (
             select(SensorSample)

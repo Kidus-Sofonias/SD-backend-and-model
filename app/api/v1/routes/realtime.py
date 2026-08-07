@@ -18,6 +18,7 @@ from app.realtime.hub import alert_hub
 from app.realtime.live_detector import live_alert_detector
 from app.repositories.trip_repository import SqlTripRepository
 from app.repositories.user_repository import SqlUserRepository
+from app.services.live_monitor_service import LiveMonitorService
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +114,23 @@ async def ws_alerts(
     finally:
         alert_hub.unsubscribe(user_id, queue)
         logger.info("Alert stream closed for user %s", user_id)
+
+
+@router.get("/trips/{trip_id}/telemetry")
+def trip_live_telemetry(
+    trip_id: str,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """Live telemetry for the caller's own trip (Phase 6 glance/details modes).
+
+    Returns current speed, IMU/longitudinal acceleration, latest GPS fix, trip
+    state, and live event counters/alert replay from the in-memory detector.
+    Event counters reset on server restart (transient live alerts are not
+    persisted); finalize remains the source of truth for stored events.
+    """
+    service = LiveMonitorService(db)
+    return service.get_trip_telemetry(user_id=user.id, trip_id=trip_id)
 
 
 @router.get("/trips/{trip_id}/alerts/recent")
