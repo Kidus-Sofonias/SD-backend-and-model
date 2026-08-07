@@ -352,7 +352,7 @@ def test_adaptive_weight_bounded_and_unknown_calibration_neutral(tmp_path: Path)
         "false_positive_rate": 0.35,
     }
     worst = adaptive_ml_blend_weight(confidence=0.0, calibration_metrics=gate_worst)
-    # Perfect calibration at max confidence: 0.35 * 1.0 * (0.6 + 0.8*1.0) = 0.49
+    # Perfect calibration at max confidence: 0.40 * 1.0 * (0.6 + 0.8*1.0) = 0.56
     perfect = {
         "brier_score": 0.0,
         "risky_trip_f1": 1.0,
@@ -361,7 +361,7 @@ def test_adaptive_weight_bounded_and_unknown_calibration_neutral(tmp_path: Path)
     best = adaptive_ml_blend_weight(confidence=1.0, calibration_metrics=perfect)
 
     assert worst == ML_WEIGHT_MIN
-    assert best == pytest.approx(0.49)  # 0.35 * 1.0 * (0.6 + 0.8*1.0)
+    assert best == pytest.approx(0.56)  # 0.40 * 1.0 * (0.6 + 0.8*1.0)
     assert ML_WEIGHT_MIN <= best <= ML_WEIGHT_MAX
 
     # Unknown calibration defaults to a moderate (not extreme) weight.

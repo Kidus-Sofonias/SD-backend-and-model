@@ -44,9 +44,13 @@ ML_CONFIDENCE_THRESHOLD = 0.5
 MEDIUM_CONFIDENCE_THRESHOLD = 0.8
 LOW_CONFIDENCE_REASON = "Low confidence trip data, used rules fallback"
 LOW_CONFIDENCE_SCORE_REASON = "Low confidence reduced score certainty"
-ML_SCORE_BLEND_WEIGHT = 0.35
+# Phase 9: base ML blend raised 0.35 -> 0.40 and ceiling 0.50 -> 0.65 after
+# the retrained model (v2 training methodology) validated at OOF risky-F1 1.0,
+# Brier 0.0009. The adaptive weight still scales with data confidence and model
+# calibration, so weak data or a poorly calibrated model keeps leaning on rules.
+ML_SCORE_BLEND_WEIGHT = 0.40
 ML_WEIGHT_MIN = 0.15
-ML_WEIGHT_MAX = 0.50
+ML_WEIGHT_MAX = 0.65
 ML_PREDICTION_BLEND_WEIGHT = 0.2
 NEUTRAL_SCORE = 60
 
@@ -95,7 +99,7 @@ def adaptive_ml_blend_weight(
     calibration_metrics: dict | None,
 ) -> float:
     """Compute the ML blend weight for a trip, scaling with data confidence and
-    the promoted model's calibration instead of the constant 0.35.
+    the promoted model's calibration instead of the constant 0.40.
 
     - Confidence factor ramps from 0.5 at the ML threshold (0.5) to 1.0 at the
       medium-confidence threshold (0.8) and above, so low-quality data leans
@@ -110,7 +114,7 @@ def adaptive_ml_blend_weight(
     weight and neutral pull). This is intentional belt-and-suspenders: weak
     data leans on the rules both at blend time and at score shaping time.
 
-    Returns a moderate weight (not the base 0.35) when confidence is unknown.
+    Returns a moderate weight (not the base 0.40) when confidence is unknown.
     """
     if confidence is None:
         conf_factor = 0.5
