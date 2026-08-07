@@ -17,6 +17,7 @@ from app.api.deps import get_db, get_current_user
 from app.core.errors import AppError
 from app.core.rate_limit import UPLOAD_RATE_LIMITER
 from app.db.init_db import ensure_sensor_sample_columns, ensure_sensor_sample_id_sequence
+from app.realtime.live_detector import live_alert_detector
 from app.schemas.sensor_samples import SensorSampleCountOut, SensorSamplesBatchIn, SensorSampleOut
 from app.repositories.sensor_sample_repository import SensorSampleRepository
 from app.repositories.trip_repository import SqlTripRepository
@@ -47,7 +48,6 @@ def upload_samples(
 
     try:
         inserted = service.add_samples(user_id=user.id, trip_id=trip_id, samples=rows)
-        return {"inserted": inserted}
     except AppError:
         raise
     except Exception as exc:
@@ -71,7 +71,6 @@ def upload_samples(
                 ensure_sensor_sample_columns()
                 ensure_sensor_sample_id_sequence()
                 inserted = service.add_samples(user_id=user.id, trip_id=trip_id, samples=rows)
-                return {"inserted": inserted}
             except Exception as retry_exc:
                 logger.error(
                     "Sample insert retry failed: type=%s message=%s\n%s",
@@ -79,23 +78,54 @@ def upload_samples(
                     str(retry_exc),
                     traceback.format_exc(),
                 )
-
-        # Return a structured JSON response so the error detail reaches the
-        # frontend (the generic http_exception_handler strips it).
-        return JSONResponse(
-            status_code=500,
-            content={
-                "ok": False,
-                "error": {
-                    "message_key": "error.sample_upload",
-                    "details": {
-                        "error_type": type(exc).__name__,
-                        "error_message": str(exc)[:500],
+                return JSONResponse(
+                    status_code=500,
+                    content={
+                        "ok": False,
+                        "error": {
+                            "message_key": "error.sample_upload",
+                            "details": {
+                                "error_type": type(retry_exc).__name__,
+                                "error_message": str(retry_exc)[:500],
+                            },
+                        },
+                        "request_id": getattr(request.state, "request_id", None),
                     },
+                )
+        else:
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "ok": False,
+                    "error": {
+                        "message_key": "error.sample_upload",
+                        "details": {
+                            "error_type": type(exc).__name__,
+                            "error_message": str(exc)[:500],
+                        },
+                    },
+                    "request_id": getattr(request.state, "request_id", None),
                 },
-                "request_id": getattr(request.state, "request_id", None),
-            },
+            )
+
+    # Phase 5: run incremental live-event detection and push any new alerts
+    # over the driver's WebSocket. Best-effort only - an alerting failure must
+    # never surface as an upload error.
+    try:
+        live_alert_detector.process_upload(
+            db=db,
+            user_id=user.id,
+            trip_id=trip_id,
+            rows=rows,
         )
+    except Exception:
+        logger.exception(
+            "Live alert processing failed (upload succeeded) trip=%s user=%s",
+            trip_id,
+            user.id,
+        )
+
+    return {"inserted": inserted}
 
 
 @router.get("/{trip_id}/samples", response_model=list[SensorSampleOut])
