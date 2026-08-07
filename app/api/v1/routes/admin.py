@@ -3,7 +3,7 @@
 # Key symbols/vars: router.
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_users_repo
@@ -18,12 +18,17 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 
 @router.get("/trips", response_model=list[TripOut])
 def list_all_trips(
+    # Admin default is the max page size so the current admin UI (which fetches
+    # all trips without paging) keeps working; proper pagination UI lands in
+    # Phase 7.
+    limit: int = Query(default=1000, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
     users: SqlUserRepository = Depends(get_users_repo),
     user=Depends(get_current_user),
 ):
     service = AdminService(db, users)
-    return service.list_all_trips(actor=user)
+    return service.list_all_trips(actor=user, limit=limit, offset=offset)
 
 
 @router.get("/drivers", response_model=list[DriverSummaryOut])

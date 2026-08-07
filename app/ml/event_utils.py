@@ -59,10 +59,21 @@ def event_segments(
         else:
             merged.append([s, e])
 
+    # CRIT-1: at GPS sample rates (0.5-2 Hz) real braking/acceleration events often
+    # span only 1-2 samples. Filtering by an absolute wall-clock duration (e.g.
+    # 0.25 s) silently discarded those events, producing "0 events despite clearly
+    # detected behavior". The duration floor is now interpreted relative to the
+    # actual sampling interval: a segment must cover at least
+    # round(min_duration_s / median_dt) samples (min 1). At 10 Hz a 0.25 s event
+    # still needs ~3 samples; at 1 Hz a single sample is a real, counted event.
+    median_dt = 0.0
+    if len(timestamps) >= 2:
+        median_dt = float(np.median(np.diff(timestamps)))
+    min_samples = max(1, int(round(min_duration_s / median_dt))) if median_dt > 0 else 1
+
     segments: list[tuple[int, int]] = []
     for s, e in merged:
-        duration = timestamps[e] - timestamps[s]
-        if duration >= min_duration_s:
+        if (e - s + 1) >= min_samples:
             segments.append((s, e))
 
     return segments

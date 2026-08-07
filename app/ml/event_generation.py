@@ -18,7 +18,6 @@ from .braking import classify_brake_segment
 from .event_utils import event_segments
 
 UNSTABLE_MOTION_JERK_THRESHOLD = 0.12
-SPEED_VARIATION_DV_THRESHOLD = 2.25
 
 def _isoformat_timestamp(value: object) -> str | None:
     if value is None:
@@ -149,17 +148,13 @@ def generate_trip_events(
             )
         )
 
-    speed_variation_segments = event_segments(np.abs(dv) >= SPEED_VARIATION_DV_THRESHOLD, t, min_event_duration_s, merge_gap_s)
-    for start, end in speed_variation_segments:
-        peak_idx = _peak_index(dv, start, end, mode="abs")
-        events.append(
-            _build_event_payload(
-                per,
-                index=peak_idx,
-                event_type="speed_variation",
-                value=abs(float(dv[peak_idx])),
-            )
-        )
+    # NOTE: the former speed_variation category was removed in Phase 2. Its
+    # |dv| >= 2.25 m/s^2 window overlapped the brake/accel thresholds (2.5 m/s^2)
+    # so nearly every event was a duplicate of a hard brake or hard acceleration
+    # (a hard brake appeared twice in the persisted event list). Speed variability
+    # remains captured by the speed_variance trip feature used in scoring.
+    # Phase 3 reintroduces a dedicated overspeed/speed-variation category with
+    # non-overlapping semantics.
 
     events.sort(key=lambda item: (item.get("occurred_at") or "", item["event_type"]))
     return events

@@ -26,9 +26,11 @@ class DrivingEventService:
         lat: float | None = None,
         lon: float | None = None,
     ):
-        # validate trip belongs to user (prevents cheating)
-        _trip = self.trip_repo.get_by_id(trip_id=trip_id, user_id=user_id)
-        # create event
+        # H-4 fix: the ownership check existed but its result was discarded, so a
+        # driver could attach events to another driver's trip. Now it is enforced.
+        trip = self.trip_repo.get_by_id(trip_id=trip_id, user_id=user_id)
+        if trip is None:
+            raise NotFoundError(message_key="trip.not_found")
         return self.repo.create(
             user_id=user_id,
             trip_id=trip_id,

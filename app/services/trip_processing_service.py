@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from datetime import datetime, timezone
 
 from sqlalchemy import delete
@@ -218,6 +219,17 @@ class TripProcessingService:
         confidence: float | None,
         ml_blend_weight: float | None = None,
     ) -> int | None:
+        # CRIT-2: never let a non-finite input produce a NaN blended score
+        # (previously crashed with "cannot convert float NaN to integer").
+        if rule_score is not None and not math.isfinite(float(rule_score)):
+            rule_score = None
+        if ml_risk_probability is not None and not math.isfinite(float(ml_risk_probability)):
+            ml_risk_probability = None
+        if confidence is not None and not math.isfinite(float(confidence)):
+            confidence = None
+        if ml_blend_weight is not None and not math.isfinite(float(ml_blend_weight)):
+            ml_blend_weight = None
+
         blend_weight = ML_SCORE_BLEND_WEIGHT if ml_blend_weight is None else ml_blend_weight
         weighted_scores: list[tuple[float, float]] = []
 
@@ -237,8 +249,12 @@ class TripProcessingService:
             return None
 
         total_weight = sum(weight for _, weight in weighted_scores)
+        if total_weight <= 0:
+            return None
         blended_score = sum(score * weight for score, weight in weighted_scores) / total_weight
         bounded_score = float(max(0.0, min(100.0, blended_score)))
+        if not math.isfinite(bounded_score):
+            return None
 
         if confidence is None:
             return int(round(bounded_score))
@@ -366,27 +382,6 @@ class TripProcessingService:
         nested = breakdown.get("rule_breakdown")
         return isinstance(nested, dict) and nested.get("error") == "not_enough_samples"
 
-    def _delete_trip_with_related_rows(self, *, user_id: str, trip_id: str) -> None:
-        self.db.execute(
-            delete(DrivingEvent).where(
-                DrivingEvent.user_id == user_id,
-                DrivingEvent.trip_id == trip_id,
-            )
-        )
-        self.db.execute(
-            delete(SensorSample).where(
-                SensorSample.user_id == user_id,
-                SensorSample.trip_id == trip_id,
-            )
-        )
-        self.db.execute(
-            delete(Trip).where(
-                Trip.user_id == user_id,
-                Trip.id == trip_id,
-            )
-        )
-        commit_with_retry(self.db)
-
     def _build_not_enough_samples_response(
         self,
         *,
@@ -394,11 +389,12 @@ class TripProcessingService:
         feature_version: str | None,
         confidence: float | None,
         rule_breakdown: dict,
+        processed_at: datetime | None = None,
     ) -> dict:
         breakdown = {
             "error": "not_enough_samples",
             "rule_breakdown": rule_breakdown,
-            "trip_deleted": True,
+            "trip_preserved": True,
         }
         return {
             "trip_id": trip_id,
@@ -411,8 +407,8 @@ class TripProcessingService:
             "model_version": MODEL_VERSION_RULES_V1,
             "feature_version": feature_version,
             "decision_source": "rules_fallback",
-            "processing_timestamp": None,
-            "raw_deleted": True,
+            "processing_timestamp": processed_at,
+            "raw_deleted": False,
             "already_processed": False,
             "reasons": [],
             "events": [],
@@ -643,8 +639,27 @@ class TripProcessingService:
         generated_events = pipeline_result.get("event_instances", [])
 
         if self._is_not_enough_samples(rule_breakdown):
+            # H-6 fix: previously the trip (and its raw samples) were DELETED here.
+            # Short trips were permanently lost and admin GETs ran destructive
+            # cleanup. Instead, preserve the trip and its samples so later
+            # reprocessing (e.g. after threshold changes) can re-evaluate it.
+            trip = self._load_trip(user_id=user_id, trip_id=trip_id)
+            trip.score = None
+            trip.score_breakdown = json.dumps(
+                {
+                    "error": "not_enough_samples",
+                    "rule_breakdown": rule_breakdown,
+                    "trip_preserved": True,
+                }
+            )
+            trip.feature_version = feature_version
+            trip.confidence = confidence
+            trip.processed_at = datetime.now(timezone.utc)
+            trip.raw_deleted = False
             try:
-                self._delete_trip_with_related_rows(user_id=user_id, trip_id=trip.id)
+                self.db.add(trip)
+                commit_with_retry(self.db)
+                self.db.refresh(trip)
             except Exception:
                 self.db.rollback()
                 raise
@@ -653,6 +668,7 @@ class TripProcessingService:
                 feature_version=feature_version,
                 confidence=confidence,
                 rule_breakdown=rule_breakdown,
+                processed_at=trip.processed_at,
             )
 
         ml_prediction: int | None = None

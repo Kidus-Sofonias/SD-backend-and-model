@@ -27,6 +27,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
+from app.core.errors import AppError
 from app.core.utils import as_utc_timestamp
 from app.db.init_db import ensure_driving_event_id_sequence, ensure_sensor_sample_id_sequence
 from app.db.models.trip import Trip
@@ -75,6 +76,8 @@ def _run_finalize_with_recovery(
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except AppError:
+        raise
     except Exception as exc:
         is_sqla = isinstance(exc, SQLAlchemyError)
         logger.error(
@@ -158,10 +161,20 @@ def end_trip(
 
 @router.get("", response_model=list[TripOut])
 def list_trips(
+    limit: int = Query(default=200, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
-    stmt = select(Trip).where(Trip.user_id == user.id).order_by(Trip.started_at.desc())
+    # H-5 fix: bounded pagination (backward compatible — defaults return the
+    # most recent 200 trips).
+    stmt = (
+        select(Trip)
+        .where(Trip.user_id == user.id)
+        .order_by(Trip.started_at.desc())
+        .limit(limit)
+        .offset(offset)
+    )
     trips = db.execute(stmt).scalars().all()
     return trips
 

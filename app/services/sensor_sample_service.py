@@ -6,7 +6,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from app.core.errors import NotFoundError
+from app.core.errors import AppError, NotFoundError
 from app.repositories.sensor_sample_repository import SensorSampleRepository
 from app.repositories.trip_repository import SqlTripRepository
 
@@ -17,9 +17,14 @@ class SensorSampleService:
         self.trip_repo = trip_repo  # ✅ trip_repo already has db
 
     def add_samples(self, *, user_id: str, trip_id: str, samples: list[dict]) -> int:
-        trip = self.trip_repo.get_by_id(trip_id, user_id=user_id)  # ✅ no db param
+        trip = self.trip_repo.get_by_id(trip_id, user_id=user_id)
         if not trip:
             raise NotFoundError("Trip not found")
+
+        # H-7 fix: only accept samples for a trip that is still in progress, so
+        # completed trips cannot be retroactively polluted with sensor data.
+        if trip.status != "active":
+            raise AppError(message_key="trip.not_active", status_code=409)
 
         return self.repo.create_many(user_id=user_id, trip_id=trip_id, rows=samples)
 

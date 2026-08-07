@@ -12,6 +12,7 @@ import numpy as np
 def _normalize(value: float, low: float, high: float) -> float:
     if high <= low:
         return 0.0
+    value = np.nan_to_num(float(value), nan=0.0, posinf=0.0, neginf=0.0)
     return float(np.clip((value - low) / (high - low), 0.0, 1.0))
 
 

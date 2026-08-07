@@ -8,12 +8,14 @@ import traceback
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, get_current_user
+from app.core.errors import AppError
+from app.core.rate_limit import UPLOAD_RATE_LIMITER
 from app.db.init_db import ensure_sensor_sample_columns, ensure_sensor_sample_id_sequence
 from app.schemas.sensor_samples import SensorSampleCountOut, SensorSamplesBatchIn, SensorSampleOut
 from app.repositories.sensor_sample_repository import SensorSampleRepository
@@ -38,11 +40,16 @@ def upload_samples(
         trip_repo=SqlTripRepository(db),
     )
 
+    if not UPLOAD_RATE_LIMITER.allow(f"upload:{user.id}"):
+        raise HTTPException(status_code=429, detail="Too many requests")
+
     rows = [s.model_dump() for s in payload.samples]
 
     try:
         inserted = service.add_samples(user_id=user.id, trip_id=trip_id, samples=rows)
         return {"inserted": inserted}
+    except AppError:
+        raise
     except Exception as exc:
         is_sqla = isinstance(exc, SQLAlchemyError)
         logger.error(

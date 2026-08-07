@@ -171,16 +171,19 @@ def aggregate_trip_features(
         confidence -= 0.25
     confidence = float(max(0.0, min(1.0, confidence)))
 
+    # NaN-safe aggregation: preprocessing guarantees finite speed/IMU values, but
+    # keeping the aggregations NaN-proof protects scoring/model inference from any
+    # future data path that slips through non-finite values (CRIT-2).
     return {
         "duration_s": duration_s,
         "n_samples": int(len(per)),
         "max_gap_s": max_gap_s,
         "median_dt_s": median_dt_s,
-        "mean_speed_mps": float(np.mean(speed)),
-        "max_speed_mps": float(np.max(speed)),
-        "speed_variance": float(np.var(speed)),
-        "p95_jerk": float(np.percentile(per["jerk_mag"], 95)),
-        "max_jerk": float(np.max(per["jerk_mag"])),
+        "mean_speed_mps": float(np.nanmean(speed)) if len(speed) else 0.0,
+        "max_speed_mps": float(np.nanmax(speed)) if len(speed) else 0.0,
+        "speed_variance": float(np.nanvar(speed)) if len(speed) else 0.0,
+        "p95_jerk": float(np.nanpercentile(per["jerk_mag"], 95)) if len(per) else 0.0,
+        "max_jerk": float(np.nanmax(per["jerk_mag"])) if len(per) else 0.0,
         "harsh_brake_count": harsh_brake_count,
         "emergency_brake_count": int(min(harsh_brake_count, emergency_brake_count)),
         "chargeable_hard_brake_count": int(chargeable_hard_brake_count),

@@ -205,7 +205,9 @@ def test_trip_api_finalize_uses_rules_fallback_when_model_fails(tmp_path: Path, 
         app.dependency_overrides.clear()
 
 
-def test_trip_api_deletes_trip_when_samples_are_insufficient(tmp_path: Path) -> None:
+def test_trip_api_preserves_trip_when_samples_are_insufficient(tmp_path: Path) -> None:
+    # Phase 2 H-6 fix: insufficient-sample trips are preserved (marked unscored)
+    # instead of being deleted, so their data survives for later reprocessing.
     session_factory = _make_session_factory(tmp_path)
     user = UserRecord(id=str(uuid.uuid4()), email="insufficient@example.com", password_hash="hashed")
 
@@ -227,15 +229,44 @@ def test_trip_api_deletes_trip_when_samples_are_insufficient(tmp_path: Path) -> 
         payload = finalize_res.json()
         assert payload["score"] is None
         assert payload["breakdown"]["error"] == "not_enough_samples"
-        assert payload["breakdown"]["trip_deleted"] is True
+        assert payload["breakdown"]["trip_preserved"] is True
+        assert payload["raw_deleted"] is False
 
         trips_res = client.get("/api/v1/trips")
         assert trips_res.status_code == 200
-        assert all(trip["id"] != trip_id for trip in trips_res.json())
+        assert any(trip["id"] == trip_id for trip in trips_res.json())
 
         with session_factory() as db:
-            deleted_trip = db.execute(select(Trip).where(Trip.id == trip_id)).scalar_one_or_none()
-            assert deleted_trip is None
+            preserved_trip = db.execute(select(Trip).where(Trip.id == trip_id)).scalar_one_or_none()
+            assert preserved_trip is not None
+            assert preserved_trip.score is None
+    finally:
+        client.close()
+        app.dependency_overrides.clear()
+
+
+def test_trip_api_rejects_upload_to_completed_trip(tmp_path: Path) -> None:
+    # Phase 2 H-7: sensor uploads are only accepted while the trip is active.
+    session_factory = _make_session_factory(tmp_path)
+    user = UserRecord(id=str(uuid.uuid4()), email="no-upload-after-end@example.com", password_hash="hashed")
+
+    with session_factory() as db:
+        db.add(User(id=user.id, email=user.email, password_hash=user.password_hash))
+        db.commit()
+
+    client = _client_with_overrides(session_factory, user)
+    tiny_samples = _load_too_few_samples()
+
+    try:
+        trip_id = client.post("/api/v1/trips/start").json()["id"]
+        upload_res = client.post(f"/api/v1/trips/{trip_id}/samples", json={"samples": tiny_samples})
+        assert upload_res.status_code == 200
+
+        client.post(f"/api/v1/trips/{trip_id}/end")
+
+        rejected = client.post(f"/api/v1/trips/{trip_id}/samples", json={"samples": tiny_samples})
+        assert rejected.status_code == 409
+        assert rejected.json()["error"]["message_key"] == "trip.not_active"
     finally:
         client.close()
         app.dependency_overrides.clear()
@@ -516,7 +547,7 @@ def test_non_admin_cannot_access_driver_management(tmp_path: Path) -> None:
         app.dependency_overrides.clear()
 
 
-def test_admin_driver_trips_omits_insufficient_sample_failures(tmp_path: Path) -> None:
+def test_admin_driver_trips_include_preserved_insufficient_sample_trips(tmp_path: Path) -> None:
     session_factory = _make_session_factory(tmp_path)
     driver = UserRecord(id=str(uuid.uuid4()), email="driver-insufficient@example.com", password_hash="hashed")
     admin = UserRecord(id=str(uuid.uuid4()), email="admin-insufficient@sdb.com", password_hash="hashed", role="admin")
@@ -543,7 +574,12 @@ def test_admin_driver_trips_omits_insufficient_sample_failures(tmp_path: Path) -
     try:
         trips_res = admin_client.get(f"/api/v1/admin/drivers/{driver.id}/trips")
         assert trips_res.status_code == 200
-        assert trips_res.json() == []
+        trips = trips_res.json()
+        # The insufficient-sample trip is preserved and visible to the admin
+        # (previously it was silently deleted on this GET).
+        assert len(trips) == 1
+        assert trips[0]["id"] == trip_id
+        assert trips[0]["score"] is None
     finally:
         admin_client.close()
         app.dependency_overrides.clear()

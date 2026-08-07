@@ -1,9 +1,10 @@
 # File role: HTTP route layer that maps requests to services/repositories and returns schema-shaped responses.
 # Connects to: fastapi, app.api.deps, app.repositories.user_repository.
 # Key symbols/vars: router, register, login, me.
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.api.deps import get_current_user, get_users_repo
+from app.core.rate_limit import LOGIN_RATE_LIMITER, client_ip_for
 from app.repositories.user_repository import SqlUserRepository, UserRecord
 from app.schemas.auth import RegisterRequest, LoginRequest
 from app.schemas.common import APIResponse
@@ -23,9 +24,12 @@ def _user_payload(user: UserRecord) -> dict:
 
 @router.post("/register", response_model=APIResponse)
 def register(
+    request: Request,
     payload: RegisterRequest,
     users: SqlUserRepository = Depends(get_users_repo),
 ) -> APIResponse:
+    if not LOGIN_RATE_LIMITER.allow(f"register:{client_ip_for(request)}"):
+        raise HTTPException(status_code=429, detail="Too many requests")
     service = AuthService(users)
     user = service.register(email=payload.email, password=payload.password)
 
@@ -37,9 +41,12 @@ def register(
 
 @router.post("/login", response_model=APIResponse)
 def login(
+    request: Request,
     payload: LoginRequest,
     users: SqlUserRepository = Depends(get_users_repo),
 ) -> APIResponse:
+    if not LOGIN_RATE_LIMITER.allow(f"login:{client_ip_for(request)}"):
+        raise HTTPException(status_code=429, detail="Too many requests")
     service = AuthService(users)
     token, expires_seconds, user = service.login(email=payload.email, password=payload.password)
 

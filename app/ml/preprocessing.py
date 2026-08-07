@@ -12,8 +12,12 @@
 
 from __future__ import annotations
 
+import logging
+
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 
 def ema(series: np.ndarray, alpha: float) -> np.ndarray:
@@ -71,6 +75,30 @@ def preprocess_samples(
     if missing:
         raise ValueError(f"Missing required fields: {missing}")
 
+    # --- Numeric sanitization (CRIT-2: null GPS speed crashed finalization) ---
+    # Coerce IMU columns to float, treating missing values as 0 (phones legitimately
+    # lack some sensors; a missing IMU reading is "no motion signal", not an error).
+    for col in ["ax", "ay", "az", "gx", "gy", "gz"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+
+    # Speed is the primary event signal: rows without a valid GPS speed cannot
+    # contribute dv/event features and would poison aggregates with NaN. Drop them
+    # here (before dt computation) so the rest of the pipeline only sees finite
+    # speed values. Route maps are built from raw samples, so dropping a sample
+    # from the scoring pipeline never affects the displayed route.
+    df["speed"] = pd.to_numeric(df["speed"], errors="coerce")
+    before_speed_drop = len(df)
+    df = df[np.isfinite(df["speed"].to_numpy(dtype=float))].copy()
+    if len(df) != before_speed_drop:
+        logger.warning(
+            "Dropped %d sample(s) with missing/invalid GPS speed during preprocessing",
+            before_speed_drop - len(df),
+        )
+    if df.empty:
+        # All rows were dropped (e.g. every sample lacked a GPS speed). Return
+        # early so downstream timestamp parsing never sees an empty frame.
+        return df
+
     # Parse timestamps one-by-one to avoid pandas choking on mixed formats
     # (e.g. timestamps with/without microseconds or timezone info).
     parsed: list[pd.Timestamp | pd.NaT] = []
@@ -111,10 +139,6 @@ def preprocess_samples(
         df["speed"] = df["speed"].astype(float) / 3.6
     else:
         df["speed"] = df["speed"].astype(float)
-
-    # Cast numeric sensor columns
-    for col in ["ax", "ay", "az", "gx", "gy", "gz"]:
-        df[col] = df[col].astype(float)
 
     # Smooth the key motion fields
     for col in ["ax", "ay", "az", "gx", "gy", "gz", "speed"]:

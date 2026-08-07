@@ -190,7 +190,9 @@ def test_finalize_trip_falls_back_to_rules_when_model_prediction_fails(tmp_path:
     assert "ml_error" in result["breakdown"]["rule_breakdown"]
 
 
-def test_finalize_trip_deletes_trip_when_samples_are_insufficient(tmp_path: Path) -> None:
+def test_finalize_trip_preserves_trip_when_samples_are_insufficient(tmp_path: Path) -> None:
+    # H-6 fix: short trips are no longer deleted; they are marked unscored and
+    # kept (with their raw samples) so a later reprocess can re-evaluate them.
     db = _make_session(tmp_path)
     user_id, trip_id = _seed_trip_with_too_few_samples(db, sample_count=1)
 
@@ -198,15 +200,27 @@ def test_finalize_trip_deletes_trip_when_samples_are_insufficient(tmp_path: Path
 
     assert result["score"] is None
     assert result["breakdown"]["error"] == "not_enough_samples"
-    assert result["breakdown"]["trip_deleted"] is True
+    assert result["breakdown"]["trip_preserved"] is True
+    assert result["raw_deleted"] is False
 
     trip = db.execute(select(Trip).where(Trip.id == trip_id)).scalar_one_or_none()
     samples = db.execute(select(SensorSample).where(SensorSample.trip_id == trip_id)).scalars().all()
-    events = db.execute(select(DrivingEvent).where(DrivingEvent.trip_id == trip_id)).scalars().all()
 
-    assert trip is None
-    assert samples == []
-    assert events == []
+    assert trip is not None
+    assert trip.score is None
+    assert trip.processed_at is not None
+    assert len(samples) == 1
+
+    # Re-finalizing without force does not re-run the pipeline (cached result).
+    cached = TripProcessingService(db).finalize_trip(user_id=user_id, trip_id=trip_id, delete_raw=False)
+    assert cached["already_processed"] is True
+
+    # Force reprocessing keeps the trip preserved as well.
+    reprocessed = TripProcessingService(db).finalize_trip(
+        user_id=user_id, trip_id=trip_id, delete_raw=False, force_reprocess=True
+    )
+    assert reprocessed["score"] is None
+    assert db.execute(select(Trip).where(Trip.id == trip_id)).scalar_one_or_none() is not None
 
 
 def test_finalize_trip_scores_trip_at_minimum_sample_threshold(tmp_path: Path) -> None:

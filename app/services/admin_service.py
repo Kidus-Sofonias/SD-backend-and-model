@@ -3,20 +3,16 @@
 # Key symbols/vars: AdminService.
 from __future__ import annotations
 
-import json
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import delete
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.errors import AppError, ForbiddenError, NotFoundError
 from app.core.security import hash_password
 from app.core.utils import as_utc_timestamp
-from app.db.models.driving_event import DrivingEvent
 from app.db.models.sensor_sample import SensorSample
 from app.db.models.trip import Trip
-from app.db.session import commit_with_retry
 from app.repositories.user_repository import DriverRecord, SqlUserRepository, UserRecord
 from app.services.route_snap_service import RouteSnapService
 
@@ -34,10 +30,10 @@ class AdminService:
         self._require_admin(actor)
         return self.users.list_drivers()
 
-    def list_all_trips(self, actor: UserRecord) -> list[Trip]:
-        """List ALL trips across all drivers (admin only)."""
+    def list_all_trips(self, actor: UserRecord, limit: int = 200, offset: int = 0) -> list[Trip]:
+        """List trips across all drivers (admin only), most recent first, paginated."""
         self._require_admin(actor)
-        stmt = select(Trip).order_by(Trip.started_at.desc())
+        stmt = select(Trip).order_by(Trip.started_at.desc()).limit(limit).offset(offset)
         return self.db.execute(stmt).scalars().all()
 
     def _trip_anchor_timestamp(self, trip: Trip) -> datetime:
@@ -134,59 +130,11 @@ class AdminService:
             "points": points,
         }
 
-    def _is_not_enough_samples(self, raw_breakdown: str | None) -> bool:
-        if not raw_breakdown:
-            return False
-        try:
-            breakdown = json.loads(raw_breakdown)
-        except Exception:
-            return False
-        if not isinstance(breakdown, dict):
-            return False
-        if breakdown.get("error") == "not_enough_samples":
-            return True
-        nested = breakdown.get("rule_breakdown")
-        return isinstance(nested, dict) and nested.get("error") == "not_enough_samples"
-
-    def _cleanup_failed_insufficient_trips(self, driver_id: str) -> None:
-        candidates = self.db.execute(
-            select(Trip.id, Trip.score_breakdown).where(
-                Trip.user_id == driver_id,
-                Trip.score.is_(None),
-                Trip.score_breakdown.is_not(None),
-            )
-        ).all()
-        trip_ids = [row.id for row in candidates if self._is_not_enough_samples(row.score_breakdown)]
-        if not trip_ids:
-            return
-
-        self.db.execute(
-            delete(DrivingEvent).where(
-                DrivingEvent.user_id == driver_id,
-                DrivingEvent.trip_id.in_(trip_ids),
-            )
-        )
-        self.db.execute(
-            delete(SensorSample).where(
-                SensorSample.user_id == driver_id,
-                SensorSample.trip_id.in_(trip_ids),
-            )
-        )
-        self.db.execute(
-            delete(Trip).where(
-                Trip.user_id == driver_id,
-                Trip.id.in_(trip_ids),
-            )
-        )
-        commit_with_retry(self.db)
-
     def get_driver_trips(self, actor: UserRecord, driver_id: str) -> list[Trip]:
         self._require_admin(actor)
         driver = self.users.get_driver_by_id(driver_id)
         if driver is None:
             raise NotFoundError(message_key="admin.driver_not_found")
-
-        self._cleanup_failed_insufficient_trips(driver_id)
 
         stmt = select(Trip).where(Trip.user_id == driver_id).order_by(Trip.started_at.desc())
         return self.db.execute(stmt).scalars().all()
@@ -196,8 +144,6 @@ class AdminService:
         driver = self.users.get_driver_by_id(driver_id)
         if driver is None:
             raise NotFoundError(message_key="admin.driver_not_found")
-
-        self._cleanup_failed_insufficient_trips(driver_id)
 
         trips = self.db.execute(
             select(Trip)
