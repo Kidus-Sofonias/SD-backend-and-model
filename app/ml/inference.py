@@ -14,7 +14,7 @@ from pathlib import Path
 import joblib
 import pandas as pd
 
-from app.ml.model_registry import get_production_model_version, model_path_for
+from app.ml.model_registry import get_production_model_version, load_metadata, model_path_for
 from app.ml.schemas import FEATURE_COLUMNS_FV1, FEATURE_VERSION
 
 
@@ -26,6 +26,7 @@ class ModelScorer:
         self.model = None
         self.model_version: str | None = None
         self.feature_version = FEATURE_VERSION
+        self.calibration_metrics: dict | None = None
 
     def load_latest(self) -> bool:
         model_version = get_production_model_version()
@@ -44,7 +45,20 @@ class ModelScorer:
                 return False
 
         self.model = joblib.load(model_path)
+        self.calibration_metrics = self._load_calibration_metrics()
         return True
+
+    def _load_calibration_metrics(self) -> dict | None:
+        """Load calibration metrics (brier_score, risky_trip_f1, etc.) from the
+        promoted model's metadata artifact, if present."""
+        if not self.model_version:
+            return None
+        try:
+            metadata = load_metadata(self.model_version)
+        except Exception:
+            return None
+        metrics = metadata.get("metrics")
+        return metrics if isinstance(metrics, dict) else None
 
     def predict(self, trip_features: dict) -> dict:
         if self.model is None:

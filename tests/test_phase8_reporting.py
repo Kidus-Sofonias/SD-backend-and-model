@@ -43,6 +43,7 @@ def test_choose_label_prioritizes_reviewed_real_before_other_sources() -> None:
         rule_score=40,
         reviewed_labels={trip.id: 1},
         synthetic_labels={trip.id: 1},
+        strong_labels={trip.id: 1},
     )
 
     assert label == 0
@@ -58,6 +59,7 @@ def test_choose_label_uses_reviewed_registry_before_weak_or_synthetic() -> None:
         rule_score=40,
         reviewed_labels={trip.id: 0},
         synthetic_labels={trip.id: 1},
+        strong_labels={trip.id: 1},
     )
 
     assert label == 0

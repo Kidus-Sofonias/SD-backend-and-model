@@ -11,7 +11,37 @@ import numpy as np
 import pandas as pd
 
 from .braking import classify_brake_segment
-from .event_utils import count_events, event_segments
+from .event_utils import event_segments
+
+
+def _shannon_entropy(values: np.ndarray, bins: int = 16, max_value: float = 6.0) -> float:
+    """Shannon entropy (bits) of a jerk-magnitude distribution on an absolute scale.
+
+    Uses fixed bin edges spanning [0, max_value] (max_value matches the rule
+    scorer's p95-jerk upper normalization bound) so entropy is comparable across
+    trips instead of being normalized to each trip's own range. Values above
+    max_value are clipped into the top bin.
+
+    A smooth trip where jerk is consistently ~0 concentrates in the first bin
+    (entropy ~ 0); an erratic trip spreads across bins (higher entropy). The
+    rule scorer only uses jerk percentiles, so this distributional shape is new
+    information for the model.
+    """
+    if len(values) == 0:
+        return 0.0
+    clipped = np.clip(np.asarray(values, dtype=float), 0.0, max_value)
+    edges = np.linspace(0.0, max_value, bins + 1)
+    hist, _ = np.histogram(clipped, bins=edges)
+    probs = hist[hist > 0] / hist.sum()
+    return float(-float(np.sum(probs * np.log2(probs))))
+
+
+def _segment_durations(
+    segments: list[tuple[int, int]],
+    t: np.ndarray,
+) -> list[float]:
+    """Duration in seconds of each sustained event segment."""
+    return [float(t[end] - t[start]) for start, end in segments]
 
 
 def compute_per_sample_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -79,9 +109,36 @@ def aggregate_trip_features(
         min_event_duration_s,
         merge_gap_s,
     )
+    harsh_accel_segments = event_segments(harsh_accel_mask, t, min_event_duration_s, merge_gap_s)
+    aggressive_turn_segments = event_segments(aggressive_turn_mask, t, min_event_duration_s, merge_gap_s)
+
     harsh_brake_count = len(harsh_brake_segments)
-    harsh_accel_count = count_events(harsh_accel_mask, t, min_event_duration_s, merge_gap_s)
-    aggressive_turn_count = count_events(aggressive_turn_mask, t, min_event_duration_s, merge_gap_s)
+    harsh_accel_count = len(harsh_accel_segments)
+    aggressive_turn_count = len(aggressive_turn_segments)
+
+    # --- Sequence-based features (signal the rule scorer does not use) ---
+    event_durations = (
+        _segment_durations(harsh_brake_segments, t)
+        + _segment_durations(harsh_accel_segments, t)
+        + _segment_durations(aggressive_turn_segments, t)
+    )
+    mean_event_duration_s = float(np.mean(event_durations)) if event_durations else 0.0
+    max_event_duration_s = float(np.max(event_durations)) if event_durations else 0.0
+
+    # Longest contiguous run where ANY event condition held — the worst sustained incident.
+    any_event_segments = event_segments(
+        harsh_brake_mask | harsh_accel_mask | aggressive_turn_mask,
+        t,
+        min_event_duration_s,
+        merge_gap_s,
+    )
+    max_consecutive_event_run_s = (
+        float(np.max([t[end] - t[start] for start, end in any_event_segments]))
+        if any_event_segments
+        else 0.0
+    )
+
+    jerk_entropy = _shannon_entropy(per["jerk_mag"].to_numpy())
 
     emergency_brake_count = sum(
         1
@@ -130,4 +187,8 @@ def aggregate_trip_features(
         "harsh_accel_count": harsh_accel_count,
         "aggressive_turn_count": aggressive_turn_count,
         "confidence": confidence,
+        "jerk_entropy": jerk_entropy,
+        "mean_event_duration_s": mean_event_duration_s,
+        "max_event_duration_s": max_event_duration_s,
+        "max_consecutive_event_run_s": max_consecutive_event_run_s,
     }

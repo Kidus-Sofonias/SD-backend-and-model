@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -20,7 +21,14 @@ from app.db.models.sensor_sample import SensorSample
 from app.db.models.trip import Trip
 from app.db.models.user import User
 from app.ml.auto_retrain import milestone_for_completed_trips, should_request_auto_retrain
-from app.services.trip_processing_service import TripProcessingService
+from app.repositories.user_repository import UserRecord
+from app.services.trip_processing_service import (
+    ML_SCORE_BLEND_WEIGHT,
+    ML_WEIGHT_MAX,
+    ML_WEIGHT_MIN,
+    TripProcessingService,
+    adaptive_ml_blend_weight,
+)
 
 
 def _make_session(tmp_path: Path) -> Session:
@@ -256,6 +264,126 @@ def test_compute_final_score_pulls_extreme_scores_toward_neutral_when_confidence
     assert low_score is not None
     assert 65 <= high_score < 100
     assert 20 < low_score <= 45
+
+
+def test_compute_final_score_uses_adaptive_blend_weight_when_provided(tmp_path: Path) -> None:
+    db = _make_session(tmp_path)
+    service = TripProcessingService(db)
+
+    # ml probability 0.5 -> ml score 50; rule score 80
+    score_low_weight = service._compute_final_score(
+        rule_score=80,
+        ml_prediction=1,
+        ml_risk_probability=0.5,
+        confidence=0.9,
+        ml_blend_weight=0.2,
+    )
+    score_high_weight = service._compute_final_score(
+        rule_score=80,
+        ml_prediction=1,
+        ml_risk_probability=0.5,
+        confidence=0.9,
+        ml_blend_weight=0.5,
+    )
+
+    assert score_low_weight is not None
+    assert score_high_weight is not None
+    # 0.8*80 + 0.2*50 = 74 ; 0.5*80 + 0.5*50 = 65
+    assert score_low_weight > score_high_weight
+    assert score_low_weight == 74
+    assert score_high_weight == 65
+
+
+def test_adaptive_weight_increases_with_confidence(tmp_path: Path) -> None:
+    calibration = {
+        "brier_score": 0.05,
+        "risky_trip_f1": 0.9,
+        "false_positive_rate": 0.1,
+    }
+
+    low_conf = adaptive_ml_blend_weight(confidence=0.5, calibration_metrics=calibration)
+    high_conf = adaptive_ml_blend_weight(confidence=0.9, calibration_metrics=calibration)
+
+    assert high_conf > low_conf
+    assert ML_WEIGHT_MIN <= low_conf <= ML_WEIGHT_MAX
+    assert ML_WEIGHT_MIN <= high_conf <= ML_WEIGHT_MAX
+
+
+def test_adaptive_weight_increases_with_model_calibration(tmp_path: Path) -> None:
+    poor_calibration = {
+        "brier_score": 0.24,
+        "risky_trip_f1": 0.56,
+        "false_positive_rate": 0.34,
+    }
+    good_calibration = {
+        "brier_score": 0.01,
+        "risky_trip_f1": 0.98,
+        "false_positive_rate": 0.0,
+    }
+
+    poor_weight = adaptive_ml_blend_weight(confidence=0.9, calibration_metrics=poor_calibration)
+    good_weight = adaptive_ml_blend_weight(confidence=0.9, calibration_metrics=good_calibration)
+
+    assert good_weight > poor_weight
+    # Well-calibrated model should exceed the old constant; poorly calibrated should not.
+    assert good_weight > ML_SCORE_BLEND_WEIGHT
+    assert poor_weight < ML_SCORE_BLEND_WEIGHT
+
+
+def test_adaptive_weight_bounded_and_unknown_calibration_neutral(tmp_path: Path) -> None:
+    # Gate-worst calibration with zero confidence must floor at the minimum.
+    gate_worst = {
+        "brier_score": 0.25,
+        "risky_trip_f1": 0.55,
+        "false_positive_rate": 0.35,
+    }
+    worst = adaptive_ml_blend_weight(confidence=0.0, calibration_metrics=gate_worst)
+    # Perfect calibration at max confidence: 0.35 * 1.0 * (0.6 + 0.8*1.0) = 0.49
+    perfect = {
+        "brier_score": 0.0,
+        "risky_trip_f1": 1.0,
+        "false_positive_rate": 0.0,
+    }
+    best = adaptive_ml_blend_weight(confidence=1.0, calibration_metrics=perfect)
+
+    assert worst == ML_WEIGHT_MIN
+    assert best == pytest.approx(0.49)  # 0.35 * 1.0 * (0.6 + 0.8*1.0)
+    assert ML_WEIGHT_MIN <= best <= ML_WEIGHT_MAX
+
+    # Unknown calibration defaults to a moderate (not extreme) weight.
+    unknown = adaptive_ml_blend_weight(confidence=0.9, calibration_metrics=None)
+    assert ML_WEIGHT_MIN <= unknown <= ML_WEIGHT_MAX
+    assert ML_SCORE_BLEND_WEIGHT <= unknown
+
+
+def test_adaptive_weight_saturates_at_medium_confidence(tmp_path: Path) -> None:
+    calibration = {"brier_score": 0.05, "risky_trip_f1": 0.9, "false_positive_rate": 0.1}
+
+    at_medium = adaptive_ml_blend_weight(confidence=0.8, calibration_metrics=calibration)
+    beyond_medium = adaptive_ml_blend_weight(confidence=1.0, calibration_metrics=calibration)
+
+    # Confidence factor saturates at 1.0 once confidence >= 0.8.
+    assert at_medium == beyond_medium
+
+
+def test_review_surfaces_ml_blend_weight(tmp_path: Path) -> None:
+    db = _make_session(tmp_path)
+    user_id, trip_id = _seed_trip_with_samples(db, "risky_trip_240_samples_1.json")
+
+    service = TripProcessingService(db)
+    result = service.finalize_trip(user_id=user_id, trip_id=trip_id, delete_raw=False)
+
+    admin = UserRecord(id="admin-1", email="admin@example.com", password_hash="hashed", role="admin")
+
+    review = service.get_trip_review(actor=admin, trip_id=trip_id)
+    assert "ml_blend_weight" in review
+    assert review["ml_blend_weight"] == result.get("ml_blend_weight")
+
+    items = service.list_review_dashboard(actor=admin, limit=10)
+    dashboard_item = next((item for item in items if item["trip_id"] == trip_id), None)
+    assert dashboard_item is not None
+    assert "ml_blend_weight" in dashboard_item
+    assert dashboard_item["ml_blend_weight"] == result.get("ml_blend_weight")
 
 
 def test_auto_retrain_milestone_only_matches_exact_interval() -> None:

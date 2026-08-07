@@ -23,4 +23,10 @@ FEATURE_COLUMNS_FV1 = [
     "harsh_accel_count",
     "aggressive_turn_count",
     "confidence",
+    # Sequence-based features: distributional + temporal shape that the rule
+    # scorer does not use (rules only look at jerk percentiles and event counts).
+    "jerk_entropy",
+    "mean_event_duration_s",
+    "max_event_duration_s",
+    "max_consecutive_event_run_s",
 ]

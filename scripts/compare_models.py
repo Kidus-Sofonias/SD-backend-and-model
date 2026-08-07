@@ -32,6 +32,18 @@ def _load_model(version: str):
     return joblib.load(model_path)
 
 
+def _trained_feature_columns(model) -> list[str]:
+    """Return the feature columns a model was actually trained on.
+
+    Models fitted on a DataFrame expose ``feature_names_in_``; fall back to the
+    current contract when that is unavailable (e.g. legacy artifacts).
+    """
+    names = getattr(model, "feature_names_in_", None)
+    if names is not None and len(names) > 0:
+        return list(names)
+    return list(FEATURE_COLUMNS_FV1)
+
+
 def _metrics(y_true, y_pred, y_prob=None) -> dict[str, Any]:
     tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
     metrics: dict[str, Any] = {
@@ -94,16 +106,21 @@ def run_compare(current_version: str | None, candidate_version: str) -> dict[str
             stratify=None,
         )
 
-    X_test = test_df[FEATURE_COLUMNS_FV1]
     y_test = test_df["label_binary"].astype(int)
 
     current_model = _load_model(current_version)
     candidate_model = _load_model(candidate_version)
 
-    current_pred = current_model.predict(X_test)
-    candidate_pred = candidate_model.predict(X_test)
-    current_prob = current_model.predict_proba(X_test)[:, 1] if hasattr(current_model, "predict_proba") else None
-    candidate_prob = candidate_model.predict_proba(X_test)[:, 1] if hasattr(candidate_model, "predict_proba") else None
+    current_features = _trained_feature_columns(current_model)
+    candidate_features = _trained_feature_columns(candidate_model)
+
+    current_X = test_df[current_features]
+    candidate_X = test_df[candidate_features]
+
+    current_pred = current_model.predict(current_X)
+    candidate_pred = candidate_model.predict(candidate_X)
+    current_prob = current_model.predict_proba(current_X)[:, 1] if hasattr(current_model, "predict_proba") else None
+    candidate_prob = candidate_model.predict_proba(candidate_X)[:, 1] if hasattr(candidate_model, "predict_proba") else None
 
     reviewed_real_subset = (
         test_df[test_df["label_tier"] == "reviewed_real"]
@@ -129,12 +146,12 @@ def run_compare(current_version: str | None, candidate_version: str) -> dict[str
             "row_count": int(len(reviewed_real_subset)),
             "current": _subset_metrics(
                 current_model,
-                reviewed_real_subset[FEATURE_COLUMNS_FV1],
+                reviewed_real_subset[current_features],
                 reviewed_real_subset["label_binary"].astype(int),
             ),
             "candidate": _subset_metrics(
                 candidate_model,
-                reviewed_real_subset[FEATURE_COLUMNS_FV1],
+                reviewed_real_subset[candidate_features],
                 reviewed_real_subset["label_binary"].astype(int),
             ),
         },
@@ -142,12 +159,12 @@ def run_compare(current_version: str | None, candidate_version: str) -> dict[str
             "row_count": int(len(reviewed_subset)),
             "current": _subset_metrics(
                 current_model,
-                reviewed_subset[FEATURE_COLUMNS_FV1],
+                reviewed_subset[current_features],
                 reviewed_subset["label_binary"].astype(int),
             ),
             "candidate": _subset_metrics(
                 candidate_model,
-                reviewed_subset[FEATURE_COLUMNS_FV1],
+                reviewed_subset[candidate_features],
                 reviewed_subset["label_binary"].astype(int),
             ),
         },
@@ -156,14 +173,14 @@ def run_compare(current_version: str | None, candidate_version: str) -> dict[str
             "current_recall": float(
                 recall_score(
                     risky_reviewed_subset["label_binary"].astype(int),
-                    current_model.predict(risky_reviewed_subset[FEATURE_COLUMNS_FV1]),
+                    current_model.predict(risky_reviewed_subset[current_features]),
                     zero_division=0,
                 )
             ) if not risky_reviewed_subset.empty else None,
             "candidate_recall": float(
                 recall_score(
                     risky_reviewed_subset["label_binary"].astype(int),
-                    candidate_model.predict(risky_reviewed_subset[FEATURE_COLUMNS_FV1]),
+                    candidate_model.predict(risky_reviewed_subset[candidate_features]),
                     zero_division=0,
                 )
             ) if not risky_reviewed_subset.empty else None,

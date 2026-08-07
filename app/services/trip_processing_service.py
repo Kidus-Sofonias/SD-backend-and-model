@@ -44,8 +44,84 @@ MEDIUM_CONFIDENCE_THRESHOLD = 0.8
 LOW_CONFIDENCE_REASON = "Low confidence trip data, used rules fallback"
 LOW_CONFIDENCE_SCORE_REASON = "Low confidence reduced score certainty"
 ML_SCORE_BLEND_WEIGHT = 0.35
+ML_WEIGHT_MIN = 0.15
+ML_WEIGHT_MAX = 0.50
 ML_PREDICTION_BLEND_WEIGHT = 0.2
 NEUTRAL_SCORE = 60
+
+# Promotion-gate reference values used to normalize calibration metrics.
+# Mirrors scripts/promote_model.py._bootstrap_threshold_check.
+CALIB_BRIER_MAX = 0.25
+CALIB_RISKY_F1_MIN = 0.55
+CALIB_FPR_MAX = 0.35
+
+
+def _clamp(value: float, low: float, high: float) -> float:
+    return float(max(low, min(high, value)))
+
+
+def _calibration_score(metrics: dict | None) -> float:
+    """Map model calibration metrics to a 0..1 quality score.
+
+    Each metric is normalized against the promotion-gate reference values:
+    brier_score (lower better, gate 0.25), risky_trip_f1 (higher better, gate
+    0.55), false_positive_rate (lower better, gate 0.35). Returns the average
+    of the available metrics; defaults to 0.75 when no metrics are present so
+    an unpromoted/unmeasured model is treated as reasonably (not perfectly)
+    calibrated.
+    """
+    if not metrics:
+        return 0.75
+
+    norms: list[float] = []
+    brier = metrics.get("brier_score")
+    if brier is not None:
+        norms.append(1.0 - _clamp(float(brier) / CALIB_BRIER_MAX, 0.0, 1.0))
+    f1 = metrics.get("risky_trip_f1")
+    if f1 is not None:
+        norms.append(_clamp((float(f1) - CALIB_RISKY_F1_MIN) / (1.0 - CALIB_RISKY_F1_MIN), 0.0, 1.0))
+    fpr = metrics.get("false_positive_rate")
+    if fpr is not None:
+        norms.append(1.0 - _clamp(float(fpr) / CALIB_FPR_MAX, 0.0, 1.0))
+
+    if not norms:
+        return 0.75
+    return sum(norms) / len(norms)
+
+
+def adaptive_ml_blend_weight(
+    confidence: float | None,
+    calibration_metrics: dict | None,
+) -> float:
+    """Compute the ML blend weight for a trip, scaling with data confidence and
+    the promoted model's calibration instead of the constant 0.35.
+
+    - Confidence factor ramps from 0.5 at the ML threshold (0.5) to 1.0 at the
+      medium-confidence threshold (0.8) and above, so low-quality data leans
+      more heavily on the deterministic rules.
+    - Calibration factor maps the model's metrics to a 0.6..1.4 multiplier
+      (poor calibration suppresses ML influence; great calibration boosts it).
+    - The result is clamped to [ML_WEIGHT_MIN, ML_WEIGHT_MAX] so the rules
+      always retain a meaningful share of the final score.
+
+    Note: confidence also feeds the neutral-score pull inside
+    _compute_final_score, so low-confidence trips are dampened twice (blend
+    weight and neutral pull). This is intentional belt-and-suspenders: weak
+    data leans on the rules both at blend time and at score shaping time.
+
+    Returns a moderate weight (not the base 0.35) when confidence is unknown.
+    """
+    if confidence is None:
+        conf_factor = 0.5
+    else:
+        ramp = (float(confidence) - ML_CONFIDENCE_THRESHOLD) / (MEDIUM_CONFIDENCE_THRESHOLD - ML_CONFIDENCE_THRESHOLD)
+        conf_factor = 0.5 + 0.5 * _clamp(ramp, 0.0, 1.0)
+
+    calib_score = _calibration_score(calibration_metrics)
+    calib_factor = 0.6 + 0.8 * calib_score  # 0.6 .. 1.4
+
+    weight = ML_SCORE_BLEND_WEIGHT * conf_factor * calib_factor
+    return _clamp(weight, ML_WEIGHT_MIN, ML_WEIGHT_MAX)
 
 
 class TripProcessingService:
@@ -140,16 +216,18 @@ class TripProcessingService:
         ml_prediction: int | None,
         ml_risk_probability: float | None,
         confidence: float | None,
+        ml_blend_weight: float | None = None,
     ) -> int | None:
+        blend_weight = ML_SCORE_BLEND_WEIGHT if ml_blend_weight is None else ml_blend_weight
         weighted_scores: list[tuple[float, float]] = []
 
         if rule_score is not None:
-            rule_weight = 1.0 if ml_risk_probability is None and ml_prediction is None else (1.0 - ML_SCORE_BLEND_WEIGHT)
+            rule_weight = 1.0 if ml_risk_probability is None and ml_prediction is None else (1.0 - blend_weight)
             weighted_scores.append((float(rule_score), rule_weight))
 
         if ml_risk_probability is not None:
             calibrated_probability = max(0.05, min(0.95, float(ml_risk_probability)))
-            weighted_scores.append((100.0 * (1.0 - calibrated_probability), ML_SCORE_BLEND_WEIGHT))
+            weighted_scores.append((100.0 * (1.0 - calibrated_probability), blend_weight))
         elif ml_prediction is not None:
             proxy_score = 78.0 if ml_prediction == 0 else 34.0
             weight = 1.0 if rule_score is None else ML_PREDICTION_BLEND_WEIGHT
@@ -350,6 +428,7 @@ class TripProcessingService:
             "score": getattr(trip, "score", None),
             "risk_level": getattr(trip, "risk_level", None),
             "risk_probability": getattr(trip, "risk_probability", None),
+            "ml_blend_weight": breakdown.get("ml_blend_weight"),
             "confidence": confidence,
             "confidence_band": self._confidence_band(confidence),
             "confidence_display": self._confidence_display(confidence),
@@ -381,6 +460,7 @@ class TripProcessingService:
             "score": trip.score,
             "risk_level": trip.risk_level,
             "risk_probability": trip.risk_probability,
+            "ml_blend_weight": breakdown.get("ml_blend_weight"),
             "confidence": confidence,
             "confidence_band": self._confidence_band(confidence),
             "confidence_display": self._confidence_display(confidence),
@@ -443,6 +523,7 @@ class TripProcessingService:
                     "score": trip.score,
                     "risk_level": trip.risk_level,
                     "risk_probability": trip.risk_probability,
+                    "ml_blend_weight": breakdown.get("ml_blend_weight"),
                     "confidence": confidence,
                     "confidence_band": self._confidence_band(confidence),
                     "confidence_display": self._confidence_display(confidence),
@@ -591,11 +672,18 @@ class TripProcessingService:
         elif trip_features:
             rule_breakdown["low_confidence"] = True
 
+        ml_blend_weight = (
+            adaptive_ml_blend_weight(confidence, self.model_scorer.calibration_metrics)
+            if ml_used
+            else None
+        )
+
         final_score = self._compute_final_score(
             rule_score=rule_score,
             ml_prediction=ml_prediction,
             ml_risk_probability=ml_risk_probability,
             confidence=confidence,
+            ml_blend_weight=ml_blend_weight,
         )
         risk_probability = self._risk_probability_from_score(final_score, ml_risk_probability)
         risk_level = self._risk_level_from_score(final_score)
@@ -614,6 +702,7 @@ class TripProcessingService:
             "rule_breakdown": rule_breakdown,
             "ml_prediction": ml_prediction,
             "ml_risk_probability": ml_risk_probability,
+            "ml_blend_weight": ml_blend_weight,
             "confidence": confidence,
             "final_score": final_score,
             "risk_level": risk_level,
