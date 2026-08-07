@@ -101,6 +101,13 @@ def test_live_telemetry_returns_speed_accel_location_and_counts(tmp_path: Path) 
         assert payload["event_total"] >= 1
         assert any(key in payload["event_counts"] for key in ("hard_brake", "emergency_brake"))
 
+        # Provisional live score derived from detected event counts.
+        live_score = payload["live_score"]
+        assert live_score["provisional"] is True
+        assert 0 <= live_score["score"] <= 100
+        assert live_score["risk_level"] in ("low", "medium", "high")
+        assert live_score["scoring_version"] == "v2-live"
+
         latest = payload["latest"]
         assert latest["speed_mps"] == rows[-1]["speed"]
         assert latest["lat"] == rows[-1]["lat"]

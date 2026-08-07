@@ -245,25 +245,37 @@ def test_trip_api_preserves_trip_when_samples_are_insufficient(tmp_path: Path) -
         app.dependency_overrides.clear()
 
 
-def test_trip_api_rejects_upload_to_completed_trip(tmp_path: Path) -> None:
-    # Phase 2 H-7: sensor uploads are only accepted while the trip is active.
+def test_trip_api_rejects_upload_to_sealed_trip(tmp_path: Path) -> None:
+    # Phase 2 H-7 (Phase 6 refinement): uploads are accepted for completed-but-
+    # UNFINALIZED trips so an offline driver can flush queued samples before
+    # finalize, but rejected once the trip has been scored/sealed.
     session_factory = _make_session_factory(tmp_path)
-    user = UserRecord(id=str(uuid.uuid4()), email="no-upload-after-end@example.com", password_hash="hashed")
+    user = UserRecord(id=str(uuid.uuid4()), email="no-upload-after-finalize@example.com", password_hash="hashed")
 
     with session_factory() as db:
         db.add(User(id=user.id, email=user.email, password_hash=user.password_hash))
         db.commit()
 
     client = _client_with_overrides(session_factory, user)
+    samples = _load_samples()
     tiny_samples = _load_too_few_samples()
 
     try:
         trip_id = client.post("/api/v1/trips/start").json()["id"]
-        upload_res = client.post(f"/api/v1/trips/{trip_id}/samples", json={"samples": tiny_samples})
+        upload_res = client.post(f"/api/v1/trips/{trip_id}/samples", json={"samples": samples})
         assert upload_res.status_code == 200
 
         client.post(f"/api/v1/trips/{trip_id}/end")
 
+        # Completed-but-unfinalized: offline flush still allowed.
+        flush_res = client.post(f"/api/v1/trips/{trip_id}/samples", json={"samples": tiny_samples})
+        assert flush_res.status_code == 200
+
+        finalize_res = client.post(f"/api/v1/trips/{trip_id}/finalize")
+        assert finalize_res.status_code == 200
+        assert finalize_res.json()["score"] is not None
+
+        # Sealed (scored) trip: no further uploads.
         rejected = client.post(f"/api/v1/trips/{trip_id}/samples", json={"samples": tiny_samples})
         assert rejected.status_code == 409
         assert rejected.json()["error"]["message_key"] == "trip.not_active"

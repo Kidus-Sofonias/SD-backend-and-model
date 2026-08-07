@@ -241,11 +241,27 @@ def test_add_event_rejects_unowned_trip(tmp_path: Path) -> None:
 # H-7 — uploads only for active trips + rate limiter
 # ---------------------------------------------------------------------------
 
-def test_upload_samples_rejects_completed_trip(tmp_path: Path) -> None:
+def test_upload_samples_rejects_sealed_trip_and_allows_unfinalized(tmp_path: Path) -> None:
+    # H-7 (Phase 6 refinement): completed-but-UNFINALIZED trips accept uploads
+    # (offline flush before finalize); scored/sealed trips reject them.
     db = _make_session(tmp_path)
     user_id = _add_user(db)
     completed_id = _add_trip(db, user_id, status="completed")
     active_id = _add_trip(db, user_id, status="active")
+
+    now = datetime(2026, 8, 1, 8, 0, 0, tzinfo=timezone.utc)
+    sealed_id = str(uuid.uuid4())
+    db.add(
+        Trip(
+            id=sealed_id,
+            user_id=user_id,
+            started_at=now,
+            ended_at=now + timedelta(minutes=5),
+            status="completed",
+            score=80,
+            processed_at=now,
+        )
+    )
     db.commit()
 
     service = SensorSampleService(
@@ -261,8 +277,11 @@ def test_upload_samples_rejects_completed_trip(tmp_path: Path) -> None:
     }
 
     with pytest.raises(AppError):
-        service.add_samples(user_id=user_id, trip_id=completed_id, samples=[sample])
+        service.add_samples(user_id=user_id, trip_id=sealed_id, samples=[sample])
 
+    # Completed-but-unfinalized and active trips both accept uploads.
+    inserted = service.add_samples(user_id=user_id, trip_id=completed_id, samples=[sample])
+    assert inserted == 1
     inserted = service.add_samples(user_id=user_id, trip_id=active_id, samples=[sample])
     assert inserted == 1
 

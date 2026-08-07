@@ -15,11 +15,60 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from app.core.errors import NotFoundError
+from app.ml.config import FeatureConfigV2
 from app.realtime.live_detector import live_alert_detector
 from app.repositories.sensor_sample_repository import SensorSampleRepository
 from app.repositories.trip_repository import SqlTripRepository
 
 LATEST_SAMPLE_WINDOW = 3
+
+
+def _provisional_live_score(counts: dict, elapsed_s: float) -> dict:
+    """Estimate the trip's safety score live from detected event counts.
+
+    Uses the same v2 penalty weights and event-density normalization as
+    finalize, but omits the smoothness terms (p95 jerk, speed variance) that
+    are only known at finalize - so this is a conservative, provisional
+    reading that tightens toward the real score as the trip progresses.
+    """
+    cfg = FeatureConfigV2()
+
+    per_event = {
+        "emergency_brake": cfg.w_emergency_brake,
+        "hard_brake": cfg.w_brake,
+        "hard_accel": cfg.w_accel,
+        "aggressive_turn": cfg.w_turn,
+        "overspeed": cfg.w_overspeed,
+        "severe_overspeed": cfg.w_severe_overspeed,
+        "unstable_motion": cfg.w_unstable_motion,
+    }
+    penalties = {key: weight * int(counts.get(key, 0)) for key, weight in per_event.items()}
+    chargeable = sum(penalties.values())
+
+    hours = max(elapsed_s / 3600.0, 1.0 / 60.0)
+    events_per_hour = chargeable / hours
+    density = cfg.w_density * min(
+        max(events_per_hour, 0.0) / cfg.density_normalize_high,
+        1.0,
+    )
+
+    raw_score = 100 - chargeable - density
+    score = int(max(0, min(100, round(raw_score))))
+    if score >= 85:
+        risk_level = "low"
+    elif score >= 65:
+        risk_level = "medium"
+    else:
+        risk_level = "high"
+
+    return {
+        "score": score,
+        "risk_level": risk_level,
+        "penalties": penalties,
+        "density_penalty": round(density, 2),
+        "provisional": True,
+        "scoring_version": "v2-live",
+    }
 
 
 def _accel_magnitude(row) -> float | None:
@@ -92,6 +141,7 @@ class LiveMonitorService:
                 "accel_mag_mps2": _accel_magnitude(latest),
                 "longitudinal_accel_mps2": _longitudinal_accel(prev, latest),
             },
+            "live_score": _provisional_live_score(counts, elapsed_s),
             "event_counts": counts,
             "event_total": int(sum(counts.values())),
             "recent_alerts": recent_alerts,

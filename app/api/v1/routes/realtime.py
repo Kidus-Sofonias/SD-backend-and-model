@@ -19,6 +19,7 @@ from app.realtime.live_detector import live_alert_detector
 from app.repositories.trip_repository import SqlTripRepository
 from app.repositories.user_repository import SqlUserRepository
 from app.services.live_monitor_service import LiveMonitorService
+from app.services.weather_service import weather_service
 
 logger = logging.getLogger(__name__)
 
@@ -151,3 +152,20 @@ def recent_trip_alerts(
         raise NotFoundError(message_key="trip.not_found")
     alerts = live_alert_detector.recent_alerts(trip_id)
     return {"trip_id": trip_id, "alerts": alerts}
+
+
+@router.get("/weather")
+def trip_weather(
+    lat: float = Query(..., ge=-90, le=90),
+    lon: float = Query(..., ge=-180, le=180),
+    user=Depends(get_current_user),
+):
+    """Current conditions + 3-day forecast for a lat/lon (Phase 6 details mode).
+
+    Proxied through Open-Meteo and cached for 15 minutes; serves stale cache
+    (``stale: true``) if the upstream is briefly unreachable. Auth required so
+    the endpoint cannot be used as an open proxy.
+    """
+    payload = weather_service.lookup(lat=lat, lon=lon)
+    payload.update({"lat": lat, "lon": lon, "source": "open-meteo"})
+    return payload

@@ -21,9 +21,13 @@ class SensorSampleService:
         if not trip:
             raise NotFoundError("Trip not found")
 
-        # H-7 fix: only accept samples for a trip that is still in progress, so
-        # completed trips cannot be retroactively polluted with sensor data.
-        if trip.status != "active":
+        # H-7 fix: reject uploads that would pollute a trip after it has been
+        # scored. We still allow uploads for completed-but-UNFINALIZED trips so
+        # an offline driver (rural/remote areas) can flush the last queued
+        # samples before finalizing; once a trip has a score/processed_at it is
+        # sealed and can no longer be touched.
+        sealed = trip.processed_at is not None or trip.score is not None
+        if trip.status != "active" and sealed:
             raise AppError(message_key="trip.not_active", status_code=409)
 
         return self.repo.create_many(user_id=user_id, trip_id=trip_id, rows=samples)
