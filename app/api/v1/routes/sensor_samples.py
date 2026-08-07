@@ -17,6 +17,7 @@ from app.api.deps import get_db, get_current_user
 from app.core.errors import AppError
 from app.core.rate_limit import UPLOAD_RATE_LIMITER
 from app.db.init_db import ensure_sensor_sample_columns, ensure_sensor_sample_id_sequence
+from app.realtime.accident_detector import accident_detector
 from app.realtime.live_detector import live_alert_detector
 from app.schemas.sensor_samples import SensorSampleCountOut, SensorSamplesBatchIn, SensorSampleOut
 from app.repositories.sensor_sample_repository import SensorSampleRepository
@@ -121,6 +122,21 @@ def upload_samples(
     except Exception:
         logger.exception(
             "Live alert processing failed (upload succeeded) trip=%s user=%s",
+            trip_id,
+            user.id,
+        )
+
+    # Phase 8: scan for accident signatures (extreme spikes + corroborating
+    # signals). Best-effort, never surfaces as an upload error.
+    try:
+        accident_detector.process_upload(
+            user_id=user.id,
+            trip_id=trip_id,
+            rows=rows,
+        )
+    except Exception:
+        logger.exception(
+            "Accident detection failed (upload succeeded) trip=%s user=%s",
             trip_id,
             user.id,
         )

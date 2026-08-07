@@ -32,6 +32,7 @@ from app.core.utils import as_utc_timestamp
 from app.db.init_db import ensure_driving_event_id_sequence, ensure_sensor_sample_id_sequence
 from app.db.models.trip import Trip
 from app.db.session import get_db
+from app.realtime.accident_detector import accident_detector
 from app.realtime.live_detector import live_alert_detector
 from app.repositories.sensor_sample_repository import SensorSampleRepository
 from app.repositories.trip_repository import SqlTripRepository
@@ -159,9 +160,10 @@ def end_trip(
     repo = SqlTripRepository(db)
     trip = repo.end_trip(trip_id=trip_id, user_id=user.id)
     if trip:
-        # Phase 5: release the live detector's in-memory window for this trip
+        # Phase 5/8: release the in-memory detection state for this trip
         # (alerts are transient; finalize re-detects from stored samples).
         live_alert_detector.clear_trip(trip_id)
+        accident_detector.clear_trip(trip_id)
     return trip
 
 

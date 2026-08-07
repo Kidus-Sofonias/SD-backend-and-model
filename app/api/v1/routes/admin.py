@@ -8,12 +8,28 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_users_repo
 from app.db.session import get_db
+from app.realtime.accident_detector import accident_detector
 from app.repositories.user_repository import SqlUserRepository
 from app.schemas.admin import AdminUpdateDriverIn, DriverInsightsOut, DriverSummaryOut, TripRouteOut
 from app.schemas.trip import TripOut
 from app.services.admin_service import AdminService
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+
+
+@router.get("/accidents/recent")
+def recent_accidents(
+    db: Session = Depends(get_db),
+    users: SqlUserRepository = Depends(get_users_repo),
+    user=Depends(get_current_user),
+):
+    """Recent high-confidence accident alerts (admin only, Phase 8).
+
+    In-memory replay buffer for admin sessions that reconnect or poll; the
+    real-time stream arrives over the fleet WebSocket channel.
+    """
+    AdminService(db, users)._require_admin(user)
+    return {"accidents": accident_detector.recent_accidents()}
 
 
 @router.get("/trips/live")
