@@ -14,6 +14,10 @@ logger = logging.getLogger(__name__)
 
 _QUEUE_MAXSIZE = 100
 
+# Every driver alert is also fanned out to this key so admin sessions can
+# subscribe once and watch the whole fleet in real time (Phase 7).
+FLEET_GLOBAL_KEY = "__fleet__"
+
 
 class AlertHub:
     """Per-user alert fan-out.

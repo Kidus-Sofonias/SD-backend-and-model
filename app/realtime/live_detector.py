@@ -19,7 +19,7 @@ from app.ml.config import FeatureConfigV2
 from app.ml.event_generation import generate_trip_events
 from app.ml.features import compute_per_sample_features
 from app.ml.preprocessing import preprocess_samples
-from app.realtime.hub import alert_hub
+from app.realtime.hub import FLEET_GLOBAL_KEY, alert_hub
 
 logger = logging.getLogger(__name__)
 
@@ -170,12 +170,18 @@ class LiveAlertDetector:
             if len(recent) > RECENT_ALERTS_CAP:
                 del recent[: len(recent) - RECENT_ALERTS_CAP]
 
-        # Publish outside the lock (hub has its own locking).
+        # Publish outside the lock (hub has its own locking). Each alert goes
+        # to the driver AND to the fleet-wide key so admin sessions can watch
+        # the whole fleet in real time (Phase 7).
         for alert in alerts:
             try:
                 alert_hub.publish(user_id, alert)
             except Exception:
                 logger.exception("Failed to publish live alert (user %s)", user_id)
+            try:
+                alert_hub.publish(FLEET_GLOBAL_KEY, alert)
+            except Exception:
+                logger.exception("Failed to publish fleet alert")
         return alerts
 
     def _detect_events(self, window: List[dict], alerted: set) -> List[dict]:

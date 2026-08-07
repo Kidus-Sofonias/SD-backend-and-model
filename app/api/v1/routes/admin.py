@@ -16,6 +16,21 @@ from app.services.admin_service import AdminService
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 
+@router.get("/trips/live")
+def list_live_trips(
+    db: Session = Depends(get_db),
+    users: SqlUserRepository = Depends(get_users_repo),
+    user=Depends(get_current_user),
+):
+    """Fleet-wide live monitoring snapshot (Phase 7 admin dashboard).
+
+    Active trips across all drivers with latest speed/location, live event
+    counters, provisional score and connection status.
+    """
+    service = AdminService(db, users)
+    return service.list_live_trips(actor=user)
+
+
 @router.get("/trips", response_model=list[TripOut])
 def list_all_trips(
     # Admin default is the max page size so the current admin UI (which fetches

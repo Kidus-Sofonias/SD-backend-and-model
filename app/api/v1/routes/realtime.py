@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user
 from app.core.jwt import decode_token
 from app.db.session import get_db
-from app.realtime.hub import alert_hub
+from app.realtime.hub import FLEET_GLOBAL_KEY, alert_hub
 from app.realtime.live_detector import live_alert_detector
 from app.repositories.trip_repository import SqlTripRepository
 from app.repositories.user_repository import SqlUserRepository
@@ -67,9 +67,15 @@ async def ws_alerts(
         return
 
     await websocket.accept()
-    queue = alert_hub.subscribe(user_id)
-    await websocket.send_json({"type": "connected", "trip_id": None})
-    logger.info("Alert stream connected for user %s", user_id)
+    queues = [alert_hub.subscribe(user_id)]
+    # Phase 7: admins additionally subscribe to the fleet-wide channel so they
+    # see every driver's live alerts without opening per-driver streams.
+    is_admin = bool(getattr(user, "is_admin", False) or getattr(user, "role", None) == "admin")
+    if is_admin:
+        queues.append(alert_hub.subscribe(FLEET_GLOBAL_KEY))
+
+    await websocket.send_json({"type": "connected", "trip_id": None, "fleet": is_admin})
+    logger.info("Alert stream connected for user %s (fleet=%s)", user_id, is_admin)
 
     loop = asyncio.get_running_loop()
     last_ping_at = loop.time()
@@ -80,9 +86,9 @@ async def ws_alerts(
             # timeout guarantees the keepalive branch below is reachable even
             # when the connection is idle (both tasks otherwise block forever).
             recv_task = asyncio.ensure_future(websocket.receive_text())
-            alert_task = asyncio.ensure_future(queue.get())
+            alert_tasks = [asyncio.ensure_future(q.get()) for q in queues]
             done, pending = await asyncio.wait(
-                {recv_task, alert_task},
+                {recv_task, *alert_tasks},
                 return_when=asyncio.FIRST_COMPLETED,
                 timeout=PING_INTERVAL_S,
             )
@@ -96,9 +102,10 @@ async def ws_alerts(
                     break
                 # Client sent a message (e.g. ping/pong) - ignore and continue.
 
-            if alert_task in done and not alert_task.cancelled():
-                message = alert_task.result()
-                await websocket.send_json(message)
+            for alert_task in alert_tasks:
+                if alert_task in done and not alert_task.cancelled():
+                    message = alert_task.result()
+                    await websocket.send_json(message)
 
             # Keep the connection alive through idle proxies.
             now = loop.time()
@@ -113,7 +120,8 @@ async def ws_alerts(
     except Exception:
         logger.exception("Alert stream error for user %s", user_id)
     finally:
-        alert_hub.unsubscribe(user_id, queue)
+        for index, queue in enumerate(queues):
+            alert_hub.unsubscribe(user_id if index == 0 else FLEET_GLOBAL_KEY, queue)
         logger.info("Alert stream closed for user %s", user_id)
 
 

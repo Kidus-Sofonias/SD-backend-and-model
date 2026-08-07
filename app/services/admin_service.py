@@ -13,8 +13,26 @@ from app.core.security import hash_password
 from app.core.utils import as_utc_timestamp
 from app.db.models.sensor_sample import SensorSample
 from app.db.models.trip import Trip
+from app.realtime.live_detector import live_alert_detector
+from app.repositories.sensor_sample_repository import SensorSampleRepository
 from app.repositories.user_repository import DriverRecord, SqlUserRepository, UserRecord
+from app.services.live_monitor_service import _accel_magnitude, _longitudinal_accel, _provisional_live_score
 from app.services.route_snap_service import RouteSnapService
+
+# A trip is "live" if its latest sample is under this age; "stale" while it
+# still has some recent data; otherwise "disconnected" (Phase 7).
+LIVE_SAMPLE_AGE_S = 60
+STALE_SAMPLE_AGE_S = 300
+
+
+def _connection_status(last_sample_age_s: float | None) -> str:
+    if last_sample_age_s is None:
+        return "disconnected"
+    if last_sample_age_s <= LIVE_SAMPLE_AGE_S:
+        return "live"
+    if last_sample_age_s <= STALE_SAMPLE_AGE_S:
+        return "stale"
+    return "disconnected"
 
 
 class AdminService:
@@ -29,6 +47,75 @@ class AdminService:
     def list_drivers(self, actor: UserRecord) -> list[DriverRecord]:
         self._require_admin(actor)
         return self.users.list_drivers()
+
+    def list_live_trips(self, actor: UserRecord) -> list[dict]:
+        """Fleet-wide live monitoring snapshot (Phase 7).
+
+        Every active trip across all drivers with latest telemetry, live event
+        counters, provisional score and connection status so admins can spot
+        drivers who need attention at a glance.
+        """
+        self._require_admin(actor)
+        now = datetime.now(timezone.utc)
+
+        trips = self.db.execute(
+            select(Trip)
+            .where(Trip.status == "active")
+            .order_by(Trip.started_at.desc())
+        ).scalars().all()
+
+        sample_repo = SensorSampleRepository(self.db)
+        results: list[dict] = []
+        for trip in trips:
+            samples = sample_repo.list_latest_by_trip(
+                user_id=trip.user_id,
+                trip_id=trip.id,
+                limit=2,
+            )
+            latest = samples[0] if samples else None
+            prev = samples[1] if len(samples) > 1 else None
+            sample_count = sample_repo.count_by_trip(user_id=trip.user_id, trip_id=trip.id)
+
+            last_sample_age_s = None
+            if latest and latest.ts is not None:
+                ts = latest.ts
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                last_sample_age_s = round(max(0.0, (now - ts).total_seconds()), 1)
+
+            started_at = trip.started_at
+            if started_at is not None and started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=timezone.utc)
+            elapsed_s = max(0.0, (now - started_at).total_seconds()) if started_at else 0.0
+
+            counts = live_alert_detector.event_counts(trip.id)
+            driver = self.users.get_driver_by_id(trip.user_id)
+
+            results.append(
+                {
+                    "trip_id": trip.id,
+                    "driver_user_id": trip.user_id,
+                    "driver_email": driver.email if driver else None,
+                    "started_at": started_at.isoformat() if started_at else None,
+                    "elapsed_s": round(elapsed_s, 1),
+                    "latest": {
+                        "ts": latest.ts.isoformat() if latest and latest.ts is not None else None,
+                        "speed_mps": latest.speed_mps if latest else None,
+                        "lat": latest.lat if latest else None,
+                        "lon": latest.lon if latest else None,
+                        "accuracy_m": latest.accuracy_m if latest else None,
+                        "accel_mag_mps2": _accel_magnitude(latest),
+                        "longitudinal_accel_mps2": _longitudinal_accel(prev, latest),
+                    },
+                    "samples_uploaded": sample_count,
+                    "event_counts": counts,
+                    "event_total": int(sum(counts.values())),
+                    "live_score": _provisional_live_score(counts, elapsed_s),
+                    "connection_status": _connection_status(last_sample_age_s),
+                    "last_sample_age_s": last_sample_age_s,
+                }
+            )
+        return results
 
     def list_all_trips(self, actor: UserRecord, limit: int = 200, offset: int = 0) -> list[Trip]:
         """List trips across all drivers (admin only), most recent first, paginated."""
