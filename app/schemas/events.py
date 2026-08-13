@@ -22,6 +22,9 @@ class DrivingEventOut(BaseModel):
     trip_id: str
     event_type: str
     value: float
+    confidence: float | None = None
+    severity: float | None = None
+    duration_s: float | None = None
     occurred_at: datetime | None = None
     lat: float | None = None
     lon: float | None = None

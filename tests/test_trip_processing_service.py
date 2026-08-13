@@ -246,7 +246,7 @@ def test_finalize_trip_schedules_auto_retrain_after_successful_finalize(tmp_path
     monkeypatch.setattr(service, "_count_completed_trips", lambda: 100)
     monkeypatch.setattr(
         "app.services.trip_processing_service.maybe_schedule_auto_retrain",
-        lambda *, completed_trip_count: scheduled_counts.append(completed_trip_count) or True,
+        lambda *, completed_trip_count, reviewed_trip_count=None: scheduled_counts.append(completed_trip_count) or True,
     )
 
     service.finalize_trip(user_id=user_id, trip_id=trip_id, delete_raw=False)

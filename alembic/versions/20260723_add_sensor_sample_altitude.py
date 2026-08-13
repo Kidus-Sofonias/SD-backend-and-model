@@ -18,7 +18,13 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column("sensor_samples", sa.Column("altitude_m", sa.Float(), nullable=True), if_not_exists=True)
+    # Dialect-safe: SQLite does not support `ADD COLUMN IF NOT EXISTS` (this
+    # migration previously broke fresh-DB `alembic upgrade head` on SQLite).
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    columns = {c["name"] for c in inspector.get_columns("sensor_samples")}
+    if "altitude_m" not in columns:
+        op.add_column("sensor_samples", sa.Column("altitude_m", sa.Float(), nullable=True))
 
 
 def downgrade() -> None:

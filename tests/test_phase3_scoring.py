@@ -170,6 +170,12 @@ def test_events_per_hour_normalizes_by_duration() -> None:
     )
 
 
-def test_scoring_version_is_v2() -> None:
+def test_scoring_version_is_v3() -> None:
     result = _run([54.0] * 120)
-    assert result["breakdown"]["scoring_version"] == "v2"
+    assert result["breakdown"]["scoring_version"] == "v3"
+
+
+def test_event_impacts_present_in_features() -> None:
+    result = _run([54.0] * 120)
+    assert "event_impacts" in result["trip_features"]
+    assert result["trip_features"]["event_impacts"]["emergency_brake"] == 0.0

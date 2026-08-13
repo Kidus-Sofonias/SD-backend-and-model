@@ -24,6 +24,7 @@ from sqlalchemy import func
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.errors import ForbiddenError
 from app.db.models.driving_event import DrivingEvent
 from app.db.models.sensor_sample import SensorSample
@@ -187,6 +188,20 @@ class TripProcessingService:
             ).scalar_one()
             or 0
         )
+
+    def _count_reviewed_real_trips(self) -> int:
+        """Count trips carrying a REAL human review label (admin review screen).
+
+        Classified via the shared review-label tier helper (case-safe on both
+        SQLite and PostgreSQL) so the review-gated retrain trigger only counts
+        genuine human ground truth, never demo or synthetic sources.
+        """
+        from app.ml.labels import is_real_review_source
+
+        sources = self.db.execute(
+            select(Trip.reviewed_label_source).where(Trip.reviewed_label.is_not(None))
+        ).scalars().all()
+        return sum(1 for source in sources if is_real_review_source(source))
 
     def _samples_to_payload(self, rows: list[SensorSample]) -> list[dict]:
         payload: list[dict] = []
@@ -359,6 +374,9 @@ class TripProcessingService:
                 "trip_id": ev.trip_id,
                 "event_type": ev.event_type,
                 "value": float(ev.value),
+                "confidence": ev.confidence,
+                "severity": ev.severity,
+                "duration_s": ev.duration_s,
                 "occurred_at": ev.occurred_at,
                 "lat": ev.lat,
                 "lon": ev.lon,
@@ -777,7 +795,13 @@ class TripProcessingService:
 
         if not force_reprocess:
             try:
-                maybe_schedule_auto_retrain(completed_trip_count=self._count_completed_trips())
+                reviewed_trip_count = (
+                    self._count_reviewed_real_trips() if settings.auto_retrain_enabled else None
+                )
+                maybe_schedule_auto_retrain(
+                    completed_trip_count=self._count_completed_trips(),
+                    reviewed_trip_count=reviewed_trip_count,
+                )
             except Exception:
                 logger.exception("Failed to schedule automatic retraining after trip finalization.")
 
@@ -812,6 +836,9 @@ class TripProcessingService:
                 trip_id=trip_id,
                 event_type=item["event_type"],
                 value=float(item["value"]),
+                confidence=item.get("confidence"),
+                severity=item.get("severity"),
+                duration_s=item.get("duration_s"),
                 occurred_at=occurred_at,
                 lat=item.get("lat"),
                 lon=item.get("lon"),

@@ -196,7 +196,7 @@ class LiveAlertDetector:
         if df.empty or len(df) < 2:
             return []
 
-        per = compute_per_sample_features(df)
+        per = compute_per_sample_features(df, nominal_dt_s=self.cfg.nominal_dt_s)
         # generate_trip_events only uses trip_features as a truthiness guard.
         events = generate_trip_events(
             per,
@@ -214,6 +214,19 @@ class LiveAlertDetector:
             overspeed_min_duration_s=self.cfg.overspeed_min_duration_s,
             severe_overspeed_threshold_mps=self.cfg.severe_overspeed_threshold_mps,
             severe_overspeed_min_duration_s=self.cfg.severe_overspeed_min_duration_s,
+            # Keep live alerts consistent with finalize (Phase 10).
+            event_cooldown_s=self.cfg.event_cooldown_s,
+            dv_min_speed_delta_mps=self.cfg.dv_min_speed_delta_mps,
+            dv_single_sample_peak_mps2=self.cfg.dv_single_sample_peak_mps2,
+            nominal_dt_s=self.cfg.nominal_dt_s,
+            unstable_cooldown_s=self.cfg.unstable_cooldown_s,
+            turn_min_speed_mps=self.cfg.turn_min_speed_mps,
+            brake_severity_ref_mps2=self.cfg.brake_severity_ref_mps2,
+            accel_severity_ref_mps2=self.cfg.accel_severity_ref_mps2,
+            turn_severity_ref_mps2=self.cfg.turn_severity_ref_mps2,
+            unstable_severity_ref_mps3=self.cfg.unstable_severity_ref_mps3,
+            overspeed_severity_ref_mps=self.cfg.overspeed_severity_ref_mps,
+            severe_overspeed_severity_ref_mps=self.cfg.severe_overspeed_severity_ref_mps,
         )
 
         new_events: List[dict] = []

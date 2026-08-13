@@ -20,6 +20,11 @@ class DrivingEvent(Base):
 
     event_type: Mapped[str] = mapped_column(String, nullable=False)
     value: Mapped[float] = mapped_column(Float, nullable=False)
+    # Phase 10 (hackathon): per-event confidence (0..1) and severity (0..1)
+    # keep "how sure are we" and "how bad was it" separate from the type.
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    severity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    duration_s: Mapped[float | None] = mapped_column(Float, nullable=True)
     occurred_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     lat: Mapped[float | None] = mapped_column(Float, nullable=True)
     lon: Mapped[float | None] = mapped_column(Float, nullable=True)

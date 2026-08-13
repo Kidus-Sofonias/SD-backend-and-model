@@ -26,10 +26,13 @@ LATEST_SAMPLE_WINDOW = 3
 def _provisional_live_score(counts: dict, elapsed_s: float) -> dict:
     """Estimate the trip's safety score live from detected event counts.
 
-    Uses the same v2 penalty weights and event-density normalization as
-    finalize, but omits the smoothness terms (p95 jerk, speed variance) that
-    are only known at finalize - so this is a conservative, provisional
-    reading that tightens toward the real score as the trip progresses.
+    Mirrors the v3 (Phase 10) finalize model: per-event penalties use the same
+    weights (live events default to severity 1.0 / high confidence because
+    per-event impacts are computed at finalize), and the exposure term uses the
+    reduced time-based density floor. Smoothness terms (p95 jerk, speed
+    variance) are only known at finalize - so this is a conservative,
+    provisional reading that tightens toward the real score as the trip
+    progresses.
     """
     cfg = FeatureConfigV2()
 
@@ -45,7 +48,7 @@ def _provisional_live_score(counts: dict, elapsed_s: float) -> dict:
     penalties = {key: weight * int(counts.get(key, 0)) for key, weight in per_event.items()}
     chargeable = sum(penalties.values())
 
-    hours = max(elapsed_s / 3600.0, 1.0 / 60.0)
+    hours = max(elapsed_s / 3600.0, cfg.density_min_duration_s / 3600.0)
     events_per_hour = chargeable / hours
     density = cfg.w_density * min(
         max(events_per_hour, 0.0) / cfg.density_normalize_high,
@@ -67,7 +70,7 @@ def _provisional_live_score(counts: dict, elapsed_s: float) -> dict:
         "penalties": penalties,
         "density_penalty": round(density, 2),
         "provisional": True,
-        "scoring_version": "v2-live",
+        "scoring_version": "v3-live",
     }
 
 

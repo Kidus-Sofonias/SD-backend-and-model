@@ -11,7 +11,35 @@ import numpy as np
 import pandas as pd
 
 from .braking import classify_brake_segment
-from .event_utils import event_segments
+from .event_utils import (
+    apply_cooldown,
+    event_segments,
+    event_severity_and_confidence,
+    filter_net_speed_delta,
+)
+
+
+EARTH_RADIUS_M = 6_371_000.0
+
+
+def _track_distance_km(per: pd.DataFrame) -> float:
+    """Approximate driven distance (km) from successive GPS fixes (haversine).
+
+    Returns 0.0 when the sample payload carried no GPS coordinates.
+    """
+    if "lat" not in per.columns or "lon" not in per.columns:
+        return 0.0
+    lats = per["lat"].to_numpy(dtype=float)
+    lons = per["lon"].to_numpy(dtype=float)
+    valid = np.isfinite(lats) & np.isfinite(lons)
+    if int(valid.sum()) < 2:
+        return 0.0
+    lats = lats[valid] * np.pi / 180.0
+    lons = lons[valid] * np.pi / 180.0
+    dlat = np.diff(lats)
+    dlon = np.diff(lons)
+    a = np.sin(dlat / 2.0) ** 2 + np.cos(lats[:-1]) * np.cos(lats[1:]) * np.sin(dlon / 2.0) ** 2
+    return float(np.sum(2.0 * EARTH_RADIUS_M * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0))))) / 1000.0
 
 
 def _shannon_entropy(values: np.ndarray, bins: int = 16, max_value: float = 6.0) -> float:
@@ -44,7 +72,7 @@ def _segment_durations(
     return [float(t[end] - t[start]) for start, end in segments]
 
 
-def compute_per_sample_features(df: pd.DataFrame) -> pd.DataFrame:
+def compute_per_sample_features(df: pd.DataFrame, nominal_dt_s: float = 0.5) -> pd.DataFrame:
     """
     Add derived per-sample features used later for event detection and trip aggregation.
 
@@ -84,6 +112,16 @@ def compute_per_sample_features(df: pd.DataFrame) -> pd.DataFrame:
         )
         jerk_raw[1:] = (a_raw[1:] - a_raw[:-1]) / np.maximum(out["dt"].iloc[1:].to_numpy(), 1e-6)
     out["jerk_mag_raw"] = np.abs(jerk_raw)
+
+    # Phase 10 (hackathon): rate-normalise raw jerk. jerk = da/dt scales with
+    # 1/dt, so the same physical bump gives a 5x larger jerk at 10 Hz than at
+    # 2 Hz. Scaling by median_dt / nominal_dt makes the threshold comparable
+    # across sampling frequencies. unstable-motion detection uses this column.
+    positive_dt = out["dt"].to_numpy()[1:]
+    positive_dt = positive_dt[positive_dt > 0]
+    median_dt = float(np.median(positive_dt)) if len(positive_dt) else float(nominal_dt_s)
+    out["jerk_scale"] = median_dt / max(float(nominal_dt_s), 1e-9)
+    out["jerk_mag_raw_norm"] = out["jerk_mag_raw"] * out["jerk_scale"]
 
     # Longitudinal acceleration from RAW speed (primary braking/accel detection
     # signal; GPS speed quantization noise ~0.3 m/s^2 is far below thresholds).
@@ -141,6 +179,21 @@ def aggregate_trip_features(
     overspeed_min_duration_s: float,
     severe_overspeed_threshold_mps: float,
     severe_overspeed_min_duration_s: float,
+    *,
+    event_cooldown_s: float = 0.0,
+    dv_min_speed_delta_mps: float = 0.0,
+    dv_single_sample_peak_mps2: float = 0.0,
+    unstable_cooldown_s: float = 0.0,
+    turn_min_speed_mps: float = 0.0,
+    nominal_dt_s: float = 0.5,
+    brake_severity_ref_mps2: float = 6.5,
+    accel_severity_ref_mps2: float = 6.5,
+    turn_severity_ref_mps2: float = 8.8,
+    unstable_severity_ref_mps3: float = 6.0,
+    overspeed_severity_ref_mps: float = 33.3,
+    severe_overspeed_severity_ref_mps: float = 38.9,
+    density_distance_normalize_high: float = 4.0,
+    density_min_duration_s: float = 120.0,
 ) -> dict:
     """
     Aggregate per-sample features into one training/inference row per trip.
@@ -156,21 +209,45 @@ def aggregate_trip_features(
 
     harsh_brake_mask = dv < harsh_brake_dv
     harsh_accel_mask = dv > harsh_accel_dv
-    aggressive_turn_mask = per["lateral_accel"].to_numpy() > aggressive_turn_threshold
-    unstable_motion_mask = per["jerk_mag_raw"].to_numpy() >= unstable_motion_jerk_threshold
+    # Phase 10: turns need a minimum speed (parking-lot gyro noise) plus the
+    # existing sustained-duration floor.
+    aggressive_turn_mask = (
+        (per["lateral_accel"].to_numpy() > aggressive_turn_threshold)
+        & (speed_raw >= turn_min_speed_mps)
+    )
+    # Phase 10: unstable-motion uses the RATE-NORMALISED raw jerk so the same
+    # physical bump yields the same jerk at any sampling frequency.
+    unstable_motion_mask = per["jerk_mag_raw_norm"].to_numpy() >= unstable_motion_jerk_threshold
     # Overspeed uses RAW speed (the EMA-smoothed stream lags behind the limit
     # and would undercount sustained high-speed stretches).
     overspeed_mask = speed_raw >= overspeed_threshold_mps
     severe_overspeed_mask = speed_raw >= severe_overspeed_threshold_mps
 
-    harsh_brake_segments = event_segments(harsh_brake_mask, t, min_event_duration_s, merge_gap_s)
-    harsh_accel_segments = event_segments(harsh_accel_mask, t, min_event_duration_s, merge_gap_s)
+    # Phase 10: FILTER first (windowed net speed change + extreme-peak escape),
+    # THEN apply cooldown, so a filtered-out first segment never suppresses its
+    # genuine successors. Rough road is a continuous CONDITION (not discrete
+    # events), so unstable_motion gets a much longer cooldown than other
+    # categories.
+    harsh_brake_segments = filter_net_speed_delta(
+        event_segments(harsh_brake_mask, t, min_event_duration_s, merge_gap_s),
+        speed_raw,
+        direction=-1, min_delta_mps=dv_min_speed_delta_mps,
+        extreme_peak_mps2=dv_single_sample_peak_mps2, nominal_dt_s=nominal_dt_s,
+    )
+    harsh_brake_segments = apply_cooldown(harsh_brake_segments, t, event_cooldown_s)
+    harsh_accel_segments = filter_net_speed_delta(
+        event_segments(harsh_accel_mask, t, min_event_duration_s, merge_gap_s),
+        speed_raw,
+        direction=1, min_delta_mps=dv_min_speed_delta_mps,
+        extreme_peak_mps2=dv_single_sample_peak_mps2, nominal_dt_s=nominal_dt_s,
+    )
+    harsh_accel_segments = apply_cooldown(harsh_accel_segments, t, event_cooldown_s)
     # Turns need to be sustained (turn_min_duration_s) so single-sample gyro
     # noise spikes do not count as aggressive cornering.
-    aggressive_turn_segments = event_segments(aggressive_turn_mask, t, turn_min_duration_s, merge_gap_s)
-    unstable_motion_segments = event_segments(unstable_motion_mask, t, min_event_duration_s, merge_gap_s)
-    overspeed_segments = event_segments(overspeed_mask, t, overspeed_min_duration_s, merge_gap_s)
-    severe_overspeed_segments = event_segments(severe_overspeed_mask, t, severe_overspeed_min_duration_s, merge_gap_s)
+    aggressive_turn_segments = event_segments(aggressive_turn_mask, t, turn_min_duration_s, merge_gap_s, event_cooldown_s)
+    unstable_motion_segments = event_segments(unstable_motion_mask, t, min_event_duration_s, merge_gap_s, unstable_cooldown_s)
+    overspeed_segments = event_segments(overspeed_mask, t, overspeed_min_duration_s, merge_gap_s, event_cooldown_s)
+    severe_overspeed_segments = event_segments(severe_overspeed_mask, t, severe_overspeed_min_duration_s, merge_gap_s, event_cooldown_s)
 
     harsh_brake_count = len(harsh_brake_segments)
     harsh_accel_count = len(harsh_accel_segments)
@@ -218,6 +295,72 @@ def aggregate_trip_features(
     )
     chargeable_hard_brake_count = max(0, harsh_brake_count - emergency_brake_count)
 
+    # Phase 10: per-event impact sums (severity x confidence-factor) that feed
+    # the v3 scorer. Keeps Event / Confidence / Severity / Score-impact as
+    # separate concepts instead of conflatiding them with the event type.
+    def _impact_sum(segments, *, event_type, values, activation, reference) -> float:
+        total = 0.0
+        for s, e in segments:
+            dur = max(0.0, float(t[e] - t[s]))
+            peak = float(np.max(np.abs(values[s : e + 1])))
+            severity, confidence = event_severity_and_confidence(
+                event_type=event_type,
+                value=peak,
+                duration_s=dur,
+                activation=activation,
+                reference=reference,
+            )
+            total += severity * (0.6 + 0.4 * confidence)
+        return total
+
+    brake_impacts: dict[str, float] = {"emergency_brake": 0.0, "hard_brake": 0.0}
+    for s, e in harsh_brake_segments:
+        dur = max(0.0, float(t[e] - t[s]))
+        peak = float(np.max(np.abs(dv[s : e + 1])))
+        severity, confidence = event_severity_and_confidence(
+            event_type="hard_brake",
+            value=peak,
+            duration_s=dur,
+            activation=abs(harsh_brake_dv),
+            reference=brake_severity_ref_mps2,
+        )
+        impact = severity * (0.6 + 0.4 * confidence)
+        category = classify_brake_segment(
+            dv,
+            speed,
+            s,
+            e,
+            emergency_brake_dv=emergency_brake_dv,
+            emergency_brake_min_speed_mps=emergency_brake_min_speed_mps,
+        )
+        brake_impacts[category] = brake_impacts.get(category, 0.0) + impact
+
+    lateral = per["lateral_accel"].to_numpy()
+    jerk_norm = per["jerk_mag_raw_norm"].to_numpy()
+    event_impacts = {
+        **brake_impacts,
+        "hard_accel": _impact_sum(
+            harsh_accel_segments, event_type="hard_accel", values=dv,
+            activation=abs(harsh_accel_dv), reference=accel_severity_ref_mps2,
+        ),
+        "aggressive_turn": _impact_sum(
+            aggressive_turn_segments, event_type="aggressive_turn", values=lateral,
+            activation=aggressive_turn_threshold, reference=turn_severity_ref_mps2,
+        ),
+        "unstable_motion": _impact_sum(
+            unstable_motion_segments, event_type="unstable_motion", values=jerk_norm,
+            activation=unstable_motion_jerk_threshold, reference=unstable_severity_ref_mps3,
+        ),
+        "overspeed": _impact_sum(
+            overspeed_segments, event_type="overspeed", values=speed_raw,
+            activation=overspeed_threshold_mps, reference=overspeed_severity_ref_mps,
+        ),
+        "severe_overspeed": _impact_sum(
+            severe_overspeed_segments, event_type="severe_overspeed", values=speed_raw,
+            activation=severe_overspeed_threshold_mps, reference=severe_overspeed_severity_ref_mps,
+        ),
+    }
+
     duration_s = float(t[-1] - t[0]) if len(t) >= 2 else 0.0
     positive_dt = dt[dt > 0]
     max_gap_s = float(np.max(positive_dt)) if len(positive_dt) else 0.0
@@ -234,8 +377,11 @@ def aggregate_trip_features(
         confidence -= 0.25
     confidence = float(max(0.0, min(1.0, confidence)))
 
-    # Exposure normalization for scoring: events per hour (floor duration at 1 min
-    # so very short trips do not produce absurd per-hour rates).
+    # Exposure normalization for scoring. Phase 10: primary basis is events per
+    # km driven (from the GPS track); time-based events-per-hour is the
+    # fallback when GPS did not move, with a reduced duration floor
+    # (density_min_duration_s) so short trips are not catastrophically
+    # penalised by per-hour rates.
     total_chargeable_events = int(
         emergency_brake_count
         + chargeable_hard_brake_count
@@ -245,8 +391,10 @@ def aggregate_trip_features(
         + severe_overspeed_count
         + unstable_motion_count
     )
-    hours = max(duration_s, 60.0) / 3600.0
+    distance_km = _track_distance_km(per)
+    hours = max(duration_s, density_min_duration_s) / 3600.0
     events_per_hour = float(total_chargeable_events / hours)
+    events_per_km = float(total_chargeable_events / max(distance_km, 0.5)) if distance_km >= 0.05 else 0.0
 
     return {
         "duration_s": duration_s,
@@ -268,6 +416,9 @@ def aggregate_trip_features(
         "severe_overspeed_count": severe_overspeed_count,
         "total_chargeable_events": total_chargeable_events,
         "events_per_hour": events_per_hour,
+        "events_per_km": events_per_km,
+        "distance_km": distance_km,
+        "event_impacts": event_impacts,
         "confidence": confidence,
         "jerk_entropy": jerk_entropy,
         "mean_event_duration_s": mean_event_duration_s,

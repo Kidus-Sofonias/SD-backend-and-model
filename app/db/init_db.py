@@ -80,6 +80,13 @@ def _ensure_driving_event_columns() -> None:
             connection.execute(text("ALTER TABLE driving_events ADD COLUMN lat FLOAT"))
         if "lon" not in columns:
             connection.execute(text("ALTER TABLE driving_events ADD COLUMN lon FLOAT"))
+        # Phase 10 (hackathon): per-event confidence/severity/duration.
+        if "confidence" not in columns:
+            connection.execute(text("ALTER TABLE driving_events ADD COLUMN confidence FLOAT"))
+        if "severity" not in columns:
+            connection.execute(text("ALTER TABLE driving_events ADD COLUMN severity FLOAT"))
+        if "duration_s" not in columns:
+            connection.execute(text("ALTER TABLE driving_events ADD COLUMN duration_s FLOAT"))
 
 
 def ensure_sensor_sample_columns() -> None:
