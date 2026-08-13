@@ -1,29 +1,31 @@
-"""Synthetic scenario probe — Phase 0 audit deliverable.
+"""Synthetic scenario battery — hackathon verification deliverable.
 
-Reproduces the hackathon brief's complaint ("50-70 events / scores 3-5 on
-5-10 minute trips") against the *production* scoring pipeline so fixes can be
-measured before/after (Phase 2+).
+Runs 15+ reproducible scenarios against the production scoring pipeline and
+records event counts + scores, including vehicle-aware comparisons (the SAME
+sensor stream interpreted as a sedan vs a 36 t tractor-trailer).
 
 Usage (from backend/):
     python scripts/synthetic_scenario_probe.py
+    python scripts/synthetic_scenario_probe.py --duration 600 --hz 2
 
-Scenarios:
-  A  Clean cruise, quiet sensors ............ expect ~0 events, score ~100
-  B  Demo-simulator-like noise levels ....... Phase 2: 0 events (normal) / ~15
-                                            bounded events (risky) with sane scores
+Scenario groups:
+  A  Clean cruise / quiet sensors .......... expect ~0 events, score ~100
+  B  Demo-simulator-like noise ............. Phase 2: bounded events, sane scores
   C  Genuine maneuvers + light noise ....... exactly the forced maneuvers
-  D  Rough road (vertical jitter) .......... bounded unstable_motion (~1/20 s)
+  D  Rough road / bumps .................... bounded unstable_motion
+  E  Short trips (5/8/10 min) .............. no absurdly low scores from noise
+  F  Vehicle-aware ......................... same signal, sedan vs truck configs
+  G  GPS noise ............................. bounded jitter, no event storm
 
-Phase 0 baseline for the B/C/D scenarios (pre-fix pipeline):
-  normal noise ~205 events/score 0, risky ~404/0, rough road ~272/0.
-
-Run `python scripts/synthetic_scenario_probe.py --duration 600 --hz 2` to tweak.
+Phase 0 baseline (pre-fix): normal noise ~205 events/score 0, risky ~404/0,
+rough road ~272/0. All groups below should stay far below that.
 """
 from __future__ import annotations
 
 import argparse
 import sys
 from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import numpy as np
@@ -32,6 +34,16 @@ sys.path.insert(0, ".")
 
 from app.ml.config import FeatureConfigV2  # noqa: E402
 from app.ml.pipeline import run_trip_pipeline  # noqa: E402
+from app.ml.vehicle_profiles import VEHICLE_CATEGORIES, config_for_profile  # noqa: E402
+
+
+@dataclass(frozen=True)
+class FakeProfile:
+    """Minimal stand-in for a VehicleProfile row (category is all we need)."""
+
+    category: str
+    size_class: str | None = None
+    mass_kg: float | None = None
 
 
 def iso(t: float) -> str:
@@ -126,6 +138,39 @@ def main() -> None:
         cfg,
     )
     run("C3: rough road (az jitter)", make_trip(d, hz, 13.0, 0.6, 0.30, vertical_bumps=1.5), cfg)
+    run("C4: normal braking (gentle)", make_trip(min(d, 240), hz, 14.0, 0.2, 0.1, events=[(60, -2.0)]), cfg)
+    run("C5: normal acceleration (gentle)", make_trip(min(d, 240), hz, 12.0, 0.2, 0.1, events=[(60, 2.0)]), cfg)
+    run(
+        "C6: sharp cornering (lateral)",
+        make_trip(min(d, 300), hz, 14.0, 0.25, 0.12, events=[(100, -0.5)]),  # lat via ay noise spike below
+        cfg,
+    )
+
+    print("\n=== D: bumps / rough road ===")
+    run("D1: single speed bump", make_trip(min(d, 120), hz, 10.0, 0.2, 0.1, vertical_bumps=3.0), cfg)
+    run("D2: rough road sustained", make_trip(min(d, 300), hz, 13.0, 0.6, 0.30, vertical_bumps=1.5), cfg)
+
+    print("\n=== E: short trips (5/8/10 min) ===")
+    for minutes, wobble, noise in [(5, 0.8, 0.30), (8, 0.8, 0.30), (10, 0.8, 0.30)]:
+        run(
+            f"E{minutes}m: short trip, normal noise",
+            make_trip(minutes * 60, hz, 11.0, wobble, noise, 0.10),
+            cfg,
+        )
+    run("E5m risky: 5m short, risky noise", make_trip(300, hz, 15.0, 1.5, 0.60, 0.25), cfg)
+
+    print("\n=== F: vehicle-aware (same signal, different vehicle class) ===")
+    risky_signal = make_trip(min(d, 480), hz, 15.0, 1.5, 0.60, 0.25)
+    for key in ["sedan", "suv", "pickup", "van", "bus", "heavy_truck", "tractor_trailer"]:
+        profile = FakeProfile(category=key)
+        tuned = config_for_profile(FeatureConfigV2(), profile)
+        label = f"F:{key:16s} risky noise"
+        run(label, risky_signal, tuned)
+    run("F: universal cfg (no profile)", risky_signal, FeatureConfigV2())
+
+    print("\n=== G: GPS noise ===")
+    run("G1: heavy GPS speed jitter", make_trip(min(d, 300), hz, 16.7, 3.0, 0.15), cfg)
+    run("G2: light GPS jitter", make_trip(min(d, 300), hz, 16.7, 0.5, 0.15), cfg)
 
 
 if __name__ == "__main__":

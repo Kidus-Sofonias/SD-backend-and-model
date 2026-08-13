@@ -43,9 +43,21 @@ from app.db.models.user import User
 from app.db.models.trip import Trip
 from app.db.models.driving_event import DrivingEvent
 from app.db.models.sensor_sample import SensorSample
+from app.db.models.vehicle_profile import VehicleProfile
 from app.ml.config import FeatureConfigV2
 from app.repositories.user_repository import UserRecord
 from app.services.trip_processing_service import TripProcessingService
+
+# Vehicle per demo driver: the driver's chosen vehicle tunes detection
+# thresholds through the vehicle-aware parameter layer (Phase 3), so each
+# seeded account also demos vehicle-aware interpretation.
+DEMO_VEHICLES: dict[str, dict[str, str]] = {
+    "abebe@gmail.com":     {"category": "sedan",           "make_model": "Toyota Corolla", "size_class": "midsize", "drive_type": "fwd"},
+    "bruktawit@gmail.com": {"category": "suv",             "make_model": "Toyota RAV4",     "size_class": "midsize", "drive_type": "awd"},
+    "chala@gmail.com":     {"category": "pickup",          "make_model": "Toyota Hilux",    "size_class": "midsize", "drive_type": "4wd"},
+    "desta@gmail.com":     {"category": "van",             "make_model": "Toyota Hiace",    "size_class": "midsize", "drive_type": "rwd"},
+    "ephrem@gmail.com":    {"category": "bus",             "make_model": "Isuzu NPR",       "size_class": "large",   "drive_type": "rwd"},
+}
 
 # ---------------------------------------------------------------------------
 # Reuse the excellent sensor-data generators from the synthetic trip script
@@ -204,6 +216,26 @@ def seed_demo_data(
             db.refresh(user)
             created_users.append(user)
 
+        # ------------------------------------------------------------------
+        # 2b.  Create a vehicle profile per driver (Phase 3 vehicle-aware)
+        # ------------------------------------------------------------------
+        for u in created_users:
+            existing_profile = db.execute(
+                select(VehicleProfile).where(VehicleProfile.user_id == u.id)
+            ).scalar_one_or_none()
+            if existing_profile:
+                continue
+            vehicle = DEMO_VEHICLES.get(u.email, {"category": "sedan", "size_class": "midsize"})
+            db.add(
+                VehicleProfile(
+                    user_id=u.id,
+                    category=vehicle["category"],
+                    make_model=vehicle.get("make_model"),
+                    size_class=vehicle.get("size_class"),
+                    drive_type=vehicle.get("drive_type"),
+                    mass_kg=None,  # curated from category + size_class
+                )
+            )
         db.commit()
 
         # Re-fetch users (ORM objects may be expired after commit)
@@ -248,8 +280,14 @@ def seed_demo_data(
                 else:
                     rows = generate_risky_profile(n_samp, DT_SECONDS)
 
+                # Bind the driver's vehicle profile to the trip so finalize
+                # scores it with vehicle-tuned thresholds (Phase 3 + 8b).
+                profile = db.execute(
+                    select(VehicleProfile).where(VehicleProfile.user_id == user.id)
+                ).scalar_one_or_none()
                 trip_id = create_trip_with_samples(
-                    db, user.id, rows, started_at, DT_SECONDS
+                    db, user.id, rows, started_at, DT_SECONDS,
+                    vehicle_profile_id=profile.id if profile else None,
                 )
                 trip_infos.append({
                     "user_id": user.id,
@@ -364,7 +402,14 @@ def seed_demo_data(
             "admin_email": admin_email,
             "drivers_created": len(created_users),
             "drivers": [
-                {"email": cfg["email"], "profile": cfg["profile"], "name": cfg["name"]}
+                {
+                    "email": cfg["email"],
+                    "profile": cfg["profile"],
+                    "name": cfg["name"],
+                    "vehicle": DEMO_VEHICLES.get(
+                        cfg["email"], {"category": "sedan"}
+                    ).get("category"),
+                }
                 for cfg in driver_configs
             ],
             "default_password": password,
@@ -504,7 +549,7 @@ def main() -> None:
     else:
         print(f"                 (already existed — use existing password)")
     for d in summary["drivers"]:
-        print(f"  Driver:        {d['email']}  ({d['name']} — {d['profile']})")
+        print(f"  Driver:        {d['email']}  ({d['name']} — {d['profile']}, {d.get('vehicle', 'sedan')})")
     print(f"                 Password: {args.password}")
     print()
     print(f"  Trips created:   {summary['trips_created']}")

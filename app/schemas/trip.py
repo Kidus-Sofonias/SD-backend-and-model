@@ -90,6 +90,7 @@ class TripReviewOut(BaseModel):
     trip_id: str
     driver_user_id: str | None = None
     driver_email: str | None = None
+    status: str | None = None
     score: int | None = None
     risk_level: str | None = None
     risk_probability: float | None = None

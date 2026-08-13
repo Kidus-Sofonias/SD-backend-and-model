@@ -112,6 +112,73 @@ def test_admin_live_trips_returns_fleet_snapshot(tmp_path: Path) -> None:
         app.dependency_overrides.clear()
 
 
+def test_admin_trip_telemetry_returns_any_drivers_live_trip(tmp_path: Path) -> None:
+    """Phase 7 live-update: admins can poll telemetry for ANY trip, not just
+    their own, so opening a live fleet trip in the detail screen stays live."""
+    session_factory = _make_session_factory(tmp_path)
+    driver = UserRecord(id=str(uuid.uuid4()), email="telemetry-driver@example.com", password_hash="hashed")
+    admin = UserRecord(id=str(uuid.uuid4()), email="telemetry-admin@example.com", password_hash="hashed", role="admin")
+
+    with session_factory() as db:
+        db.add(User(id=driver.id, email=driver.email, password_hash=driver.password_hash, role=driver.role))
+        db.add(User(id=admin.id, email=admin.email, password_hash=admin.password_hash, role=admin.role))
+        db.commit()
+
+    driver_client = _client_with_overrides(session_factory, driver)
+    try:
+        trip_id = driver_client.post("/api/v1/trips/start").json()["id"]
+        upload = driver_client.post(f"/api/v1/trips/{trip_id}/samples", json={"samples": _samples()})
+        assert upload.status_code == 200
+    finally:
+        driver_client.close()
+        app.dependency_overrides.clear()
+
+    admin_client = _client_with_overrides(session_factory, admin)
+    try:
+        res = admin_client.get(f"/api/v1/admin/trips/{trip_id}/telemetry")
+        assert res.status_code == 200
+        payload = res.json()
+        assert payload["trip_id"] == trip_id
+        assert payload["status"] == "active"
+        assert payload["samples_uploaded"] == 4
+        assert payload["latest"]["speed_mps"] == 22.0
+        assert payload["live_score"]["provisional"] is True
+        assert payload["event_total"] >= 0
+    finally:
+        admin_client.close()
+        app.dependency_overrides.clear()
+
+
+def test_admin_trip_telemetry_rejects_non_admin_and_missing_trip(tmp_path: Path) -> None:
+    session_factory = _make_session_factory(tmp_path)
+    driver = UserRecord(id=str(uuid.uuid4()), email="telemetry-driver2@example.com", password_hash="hashed")
+    admin = UserRecord(id=str(uuid.uuid4()), email="telemetry-admin2@example.com", password_hash="hashed", role="admin")
+
+    with session_factory() as db:
+        db.add(User(id=driver.id, email=driver.email, password_hash=driver.password_hash, role=driver.role))
+        db.add(User(id=admin.id, email=admin.email, password_hash=admin.password_hash, role=admin.role))
+        db.commit()
+
+    # Non-admin cannot read another driver's live telemetry.
+    driver_client = _client_with_overrides(session_factory, driver)
+    try:
+        trip_id = driver_client.post("/api/v1/trips/start").json()["id"]
+        res = driver_client.get(f"/api/v1/admin/trips/{trip_id}/telemetry")
+        assert res.status_code == 403
+    finally:
+        driver_client.close()
+        app.dependency_overrides.clear()
+
+    # Admin gets 404 for a missing trip.
+    admin_client = _client_with_overrides(session_factory, admin)
+    try:
+        res = admin_client.get(f"/api/v1/admin/trips/{uuid.uuid4()}/telemetry")
+        assert res.status_code == 404
+    finally:
+        admin_client.close()
+        app.dependency_overrides.clear()
+
+
 def test_admin_live_trips_rejects_non_admin(tmp_path: Path) -> None:
     session_factory = _make_session_factory(tmp_path)
     driver = UserRecord(id=str(uuid.uuid4()), email="plain-driver@example.com", password_hash="hashed")

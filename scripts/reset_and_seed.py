@@ -199,7 +199,8 @@ def main() -> None:
     print("-" * 60)
     print(f"  Admin:     {summary['admin_email']} / {args.admin_password or args.password}")
     for driver in summary["drivers"]:
-        print(f"  Driver:    {driver['email']}  ({driver['name']} – {driver['profile']}) / {args.password}")
+        print(f"  Driver:    {driver['email']}  ({driver['name']} – {driver['profile']}, "
+              f"{driver.get('vehicle', 'sedan')}) / {args.password}")
     print(f"  Trips:     {summary['trips_created']} created, {summary['trips_finalized']} finalized, "
           f"{summary['trips_reviewed']} demo-reviewed")
     print("  Review labels are 'demo_review' — the admin UI is the source of real human reviews.")

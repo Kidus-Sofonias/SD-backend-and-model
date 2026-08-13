@@ -484,6 +484,7 @@ class TripProcessingService:
             "trip_id": trip.id,
             "driver_user_id": trip.user_id,
             "driver_email": driver_email,
+            "status": trip.status,
             "score": trip.score,
             "risk_level": trip.risk_level,
             "risk_probability": trip.risk_probability,

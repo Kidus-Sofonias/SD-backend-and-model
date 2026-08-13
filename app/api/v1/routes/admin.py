@@ -32,6 +32,23 @@ def recent_accidents(
     return {"accidents": accident_detector.recent_accidents()}
 
 
+@router.get("/trips/{trip_id}/telemetry")
+def get_admin_trip_telemetry(
+    trip_id: str,
+    db: Session = Depends(get_db),
+    users: SqlUserRepository = Depends(get_users_repo),
+    user=Depends(get_current_user),
+):
+    """Live telemetry for ANY trip (admin only, Phase 7 fleet -> detail).
+
+    Mirrors the driver-scoped telemetry endpoint so admins opening a live
+    trip from the fleet dashboard get continuously updating speed, samples,
+    event counts and provisional score.
+    """
+    service = AdminService(db, users)
+    return service.get_live_trip_telemetry(actor=user, trip_id=trip_id)
+
+
 @router.get("/trips/live")
 def list_live_trips(
     db: Session = Depends(get_db),

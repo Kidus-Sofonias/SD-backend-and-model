@@ -135,6 +135,26 @@ class AdminService:
             )
         return results
 
+    def get_live_trip_telemetry(self, actor: UserRecord, trip_id: str) -> dict:
+        """Live telemetry for ANY trip (admin only, Phase 7 fleet -> detail).
+
+        The driver-scoped endpoint serves only the caller's own trip; admins
+        opening a live trip from the fleet dashboard need the same payload for
+        whichever driver's trip they are inspecting.
+        """
+        self._require_admin(actor)
+        trip = self.db.execute(
+            select(Trip).where(Trip.id == trip_id)
+        ).scalar_one_or_none()
+        if trip is None:
+            raise NotFoundError(message_key="trip.not_found")
+        from app.services.live_monitor_service import LiveMonitorService
+
+        return LiveMonitorService(self.db).get_trip_telemetry(
+            user_id=trip.user_id,
+            trip_id=trip.id,
+        )
+
     def list_all_trips(self, actor: UserRecord, limit: int = 200, offset: int = 0) -> list[Trip]:
         """List trips across all drivers (admin only), most recent first, paginated."""
         self._require_admin(actor)
