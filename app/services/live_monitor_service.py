@@ -15,7 +15,9 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from app.core.errors import NotFoundError
+from app.db.models.vehicle_profile import VehicleProfile
 from app.ml.config import FeatureConfigV2
+from app.ml.vehicle_profiles import config_for_profile
 from app.realtime.live_detector import live_alert_detector
 from app.repositories.sensor_sample_repository import SensorSampleRepository
 from app.repositories.trip_repository import SqlTripRepository
@@ -23,18 +25,46 @@ from app.repositories.trip_repository import SqlTripRepository
 LATEST_SAMPLE_WINDOW = 3
 
 
-def _provisional_live_score(counts: dict, elapsed_s: float) -> dict:
+def vehicle_tuned_cfg(
+    db: Session,
+    trip,
+    *,
+    profiles: dict[str, VehicleProfile] | None = None,
+) -> FeatureConfigV2:
+    """Vehicle-tuned detection config for a trip's live scoring/alerting.
+
+    Falls back to the universal default when the trip has no vehicle profile
+    (or it cannot be loaded). Pass a preloaded ``{id: profile}`` map to avoid
+    N+1 lookups in fleet-wide admin views.
+    """
+    profile = None
+    profile_id = getattr(trip, "vehicle_profile_id", None)
+    if profile_id:
+        if profiles is not None:
+            profile = profiles.get(profile_id)
+        else:
+            profile = db.get(VehicleProfile, profile_id)
+    return config_for_profile(FeatureConfigV2(), profile)
+
+
+def _provisional_live_score(
+    counts: dict,
+    elapsed_s: float,
+    cfg: FeatureConfigV2 | None = None,
+) -> dict:
     """Estimate the trip's safety score live from detected event counts.
 
     Mirrors the v3 (Phase 10) finalize model: per-event penalties use the same
     weights (live events default to severity 1.0 / high confidence because
     per-event impacts are computed at finalize), and the exposure term uses the
     reduced time-based density floor. Smoothness terms (p95 jerk, speed
-    variance) are only known at finalize - so this is a conservative,
+    variance) are only known at finalize - so this is a    conservative,
     provisional reading that tightens toward the real score as the trip
-    progresses.
+    progresses. ``cfg`` may be a vehicle-tuned config (same weights, so the
+    vehicle effect enters through the event counts produced by the tuned
+    detection thresholds).
     """
-    cfg = FeatureConfigV2()
+    cfg = cfg or FeatureConfigV2()
 
     per_event = {
         "emergency_brake": cfg.w_emergency_brake,
@@ -128,6 +158,7 @@ class LiveMonitorService:
 
         counts = live_alert_detector.event_counts(trip_id)
         recent_alerts = live_alert_detector.recent_alerts(trip_id)
+        cfg = vehicle_tuned_cfg(self.db, trip)
 
         return {
             "trip_id": trip.id,
@@ -144,7 +175,7 @@ class LiveMonitorService:
                 "accel_mag_mps2": _accel_magnitude(latest),
                 "longitudinal_accel_mps2": _longitudinal_accel(prev, latest),
             },
-            "live_score": _provisional_live_score(counts, elapsed_s),
+            "live_score": _provisional_live_score(counts, elapsed_s, cfg),
             "event_counts": counts,
             "event_total": int(sum(counts.values())),
             "recent_alerts": recent_alerts,

@@ -31,7 +31,10 @@ from app.core.errors import AppError
 from app.core.utils import as_utc_timestamp
 from app.db.init_db import ensure_driving_event_id_sequence, ensure_sensor_sample_id_sequence
 from app.db.models.trip import Trip
+from app.db.models.vehicle_profile import VehicleProfile
 from app.db.session import get_db
+from app.ml.config import FeatureConfigV2
+from app.ml.vehicle_profiles import config_for_profile
 from app.realtime.accident_detector import accident_detector
 from app.realtime.live_detector import live_alert_detector
 from app.repositories.sensor_sample_repository import SensorSampleRepository
@@ -150,10 +153,32 @@ def start_trip(
     if active:
         raise HTTPException(status_code=400, detail="You already have an active trip")
 
-    return repo.create_trip(
+    # Phase 3: resolve the vehicle profile for this trip (explicit id first,
+    # else the driver's saved profile) so detection and live alerts are
+    # tuned to the vehicle's physical expectations.
+    profile = None
+    if payload and payload.vehicle_profile_id:
+        profile = db.get(VehicleProfile, payload.vehicle_profile_id)
+        if profile is None or profile.user_id != user.id:
+            raise HTTPException(status_code=404, detail="Vehicle profile not found")
+    else:
+        profile = db.execute(
+            select(VehicleProfile).where(VehicleProfile.user_id == user.id)
+        ).scalar_one_or_none()
+
+    trip = repo.create_trip(
         user_id=user.id,
-        vehicle_profile_id=payload.vehicle_profile_id if payload else None,
+        vehicle_profile_id=profile.id if profile else None,
     )
+
+    # Phase 5: bind the vehicle-tuned config so live alerts use the driver's
+    # thresholds (a truck's ~-1.6 m/s^2 hard-brake floor, not the sedan's
+    # -3.2 m/s^2). The detector falls back to the universal default otherwise.
+    live_alert_detector.set_trip_config(
+        trip.id,
+        config_for_profile(FeatureConfigV2(), profile),
+    )
+    return trip
 
 
 @router.post("/{trip_id}/end", response_model=TripOut)

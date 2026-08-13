@@ -15,10 +15,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.models.driving_event import DrivingEvent
+from app.db.models.trip import Trip
+from app.db.models.vehicle_profile import VehicleProfile
 from app.ml.config import FeatureConfigV2
 from app.ml.event_generation import generate_trip_events
 from app.ml.features import compute_per_sample_features
 from app.ml.preprocessing import preprocess_samples
+from app.ml.vehicle_profiles import config_for_profile
 from app.realtime.hub import FLEET_GLOBAL_KEY, alert_hub
 
 logger = logging.getLogger(__name__)
@@ -42,6 +45,12 @@ class LiveAlertDetector:
         self._recent: Dict[str, List[dict]] = {}
         # trip_id -> set of trips whose DB-seed has been applied
         self._seeded: set = set()
+        # trip_id -> vehicle-tuned FeatureConfigV2 (Phase 3/5: live alerts use
+        # the driver's vehicle thresholds). Falls back to self.cfg.
+        self._trip_cfgs: Dict[str, FeatureConfigV2] = {}
+        # trip_id -> trips whose vehicle-config DB lookup has been attempted
+        # (so trips without a profile are not re-queried on every upload).
+        self._config_seeded: set = set()
 
     # -- helpers ------------------------------------------------------------
 
@@ -98,6 +107,36 @@ class LiveAlertDetector:
 
     # -- lifecycle -----------------------------------------------------------
 
+    def set_trip_config(self, trip_id: str, cfg: FeatureConfigV2) -> None:
+        """Bind a vehicle-tuned detection config to a trip (set at trip start
+        so live alert thresholds match the driver's vehicle)."""
+        with self._lock:
+            self._trip_cfgs[trip_id] = cfg
+
+    def _bind_config_from_db(self, db: Session, trip_id: str) -> None:
+        """Best-effort lazy re-bind of the trip's vehicle-tuned config.
+
+        ``set_trip_config`` is called at trip start; after a server restart the
+        in-memory binding is gone, so this restores it from the persisted trip
+        row (trip.vehicle_profile_id) on the next upload. Never raises into
+        the upload path and only queries once per trip.
+        """
+        if trip_id in self._config_seeded:
+            return
+        try:
+            trip = db.get(Trip, trip_id)
+            profile = None
+            if trip is not None and trip.vehicle_profile_id:
+                profile = db.get(VehicleProfile, trip.vehicle_profile_id)
+            if profile is not None:
+                with self._lock:
+                    self._trip_cfgs[trip_id] = config_for_profile(FeatureConfigV2(), profile)
+        except Exception:
+            logger.exception("Failed to bind vehicle config from DB (trip %s)", trip_id)
+        finally:
+            with self._lock:
+                self._config_seeded.add(trip_id)
+
     def _seed_from_db(self, db: Session, user_id: str, trip_id: str) -> None:
         """Pre-populate the alerted set with events already persisted for this
         trip so a server restart never replays old alerts."""
@@ -136,6 +175,7 @@ class LiveAlertDetector:
             return []
 
         self._seed_from_db(db, user_id, trip_id)
+        self._bind_config_from_db(db, trip_id)
 
         payloads = [self._row_to_pipeline(row) for row in rows]
 
@@ -149,7 +189,7 @@ class LiveAlertDetector:
             # Detect on the window (best-effort; never raise into the upload path).
             new_events: List[dict] = []
             try:
-                new_events = self._detect_events(window, alerted)
+                new_events = self._detect_events(trip_id, window, alerted)
             except Exception:
                 logger.exception("Live event detection failed (trip %s)", trip_id)
 
@@ -184,49 +224,51 @@ class LiveAlertDetector:
                 logger.exception("Failed to publish fleet alert")
         return alerts
 
-    def _detect_events(self, window: List[dict], alerted: set) -> List[dict]:
-        """Run the v2 detection pipeline over the window and return events not
-        already alerted (also marks them as alerted)."""
+    def _detect_events(self, trip_id: str, window: List[dict], alerted: set) -> List[dict]:
+        """Run the detection pipeline over the window with the trip's
+        vehicle-tuned config (universal default when the trip has no profile)
+        and return events not already alerted (also marks them as alerted)."""
+        cfg = self._trip_cfgs.get(trip_id, self.cfg)
         df = preprocess_samples(
             window,
-            self.cfg.max_gap_s,
-            self.cfg.ema_alpha,
-            self.cfg.input_speed_unit,
+            cfg.max_gap_s,
+            cfg.ema_alpha,
+            cfg.input_speed_unit,
         )
         if df.empty or len(df) < 2:
             return []
 
-        per = compute_per_sample_features(df, nominal_dt_s=self.cfg.nominal_dt_s)
+        per = compute_per_sample_features(df, nominal_dt_s=cfg.nominal_dt_s)
         # generate_trip_events only uses trip_features as a truthiness guard.
         events = generate_trip_events(
             per,
             {"confidence": 1.0},
-            harsh_brake_dv=self.cfg.harsh_brake_dv,
-            harsh_accel_dv=self.cfg.harsh_accel_dv,
-            emergency_brake_dv=self.cfg.emergency_brake_dv,
-            emergency_brake_min_speed_mps=self.cfg.emergency_brake_min_speed_mps,
-            aggressive_turn_threshold=self.cfg.aggressive_turn_threshold,
-            turn_min_duration_s=self.cfg.turn_min_duration_s,
-            min_event_duration_s=self.cfg.min_event_duration_s,
-            merge_gap_s=self.cfg.merge_gap_s,
-            unstable_motion_jerk_threshold=self.cfg.unstable_motion_jerk_threshold,
-            overspeed_threshold_mps=self.cfg.overspeed_threshold_mps,
-            overspeed_min_duration_s=self.cfg.overspeed_min_duration_s,
-            severe_overspeed_threshold_mps=self.cfg.severe_overspeed_threshold_mps,
-            severe_overspeed_min_duration_s=self.cfg.severe_overspeed_min_duration_s,
+            harsh_brake_dv=cfg.harsh_brake_dv,
+            harsh_accel_dv=cfg.harsh_accel_dv,
+            emergency_brake_dv=cfg.emergency_brake_dv,
+            emergency_brake_min_speed_mps=cfg.emergency_brake_min_speed_mps,
+            aggressive_turn_threshold=cfg.aggressive_turn_threshold,
+            turn_min_duration_s=cfg.turn_min_duration_s,
+            min_event_duration_s=cfg.min_event_duration_s,
+            merge_gap_s=cfg.merge_gap_s,
+            unstable_motion_jerk_threshold=cfg.unstable_motion_jerk_threshold,
+            overspeed_threshold_mps=cfg.overspeed_threshold_mps,
+            overspeed_min_duration_s=cfg.overspeed_min_duration_s,
+            severe_overspeed_threshold_mps=cfg.severe_overspeed_threshold_mps,
+            severe_overspeed_min_duration_s=cfg.severe_overspeed_min_duration_s,
             # Keep live alerts consistent with finalize (Phase 10).
-            event_cooldown_s=self.cfg.event_cooldown_s,
-            dv_min_speed_delta_mps=self.cfg.dv_min_speed_delta_mps,
-            dv_single_sample_peak_mps2=self.cfg.dv_single_sample_peak_mps2,
-            nominal_dt_s=self.cfg.nominal_dt_s,
-            unstable_cooldown_s=self.cfg.unstable_cooldown_s,
-            turn_min_speed_mps=self.cfg.turn_min_speed_mps,
-            brake_severity_ref_mps2=self.cfg.brake_severity_ref_mps2,
-            accel_severity_ref_mps2=self.cfg.accel_severity_ref_mps2,
-            turn_severity_ref_mps2=self.cfg.turn_severity_ref_mps2,
-            unstable_severity_ref_mps3=self.cfg.unstable_severity_ref_mps3,
-            overspeed_severity_ref_mps=self.cfg.overspeed_severity_ref_mps,
-            severe_overspeed_severity_ref_mps=self.cfg.severe_overspeed_severity_ref_mps,
+            event_cooldown_s=cfg.event_cooldown_s,
+            dv_min_speed_delta_mps=cfg.dv_min_speed_delta_mps,
+            dv_single_sample_peak_mps2=cfg.dv_single_sample_peak_mps2,
+            nominal_dt_s=cfg.nominal_dt_s,
+            unstable_cooldown_s=cfg.unstable_cooldown_s,
+            turn_min_speed_mps=cfg.turn_min_speed_mps,
+            brake_severity_ref_mps2=cfg.brake_severity_ref_mps2,
+            accel_severity_ref_mps2=cfg.accel_severity_ref_mps2,
+            turn_severity_ref_mps2=cfg.turn_severity_ref_mps2,
+            unstable_severity_ref_mps3=cfg.unstable_severity_ref_mps3,
+            overspeed_severity_ref_mps=cfg.overspeed_severity_ref_mps,
+            severe_overspeed_severity_ref_mps=cfg.severe_overspeed_severity_ref_mps,
         )
 
         new_events: List[dict] = []
@@ -265,6 +307,8 @@ class LiveAlertDetector:
             self._windows.pop(trip_id, None)
             self._alerted.pop(trip_id, None)
             self._recent.pop(trip_id, None)
+            self._trip_cfgs.pop(trip_id, None)
+            self._config_seeded.discard(trip_id)
             self._seeded.discard(trip_id)
 
 

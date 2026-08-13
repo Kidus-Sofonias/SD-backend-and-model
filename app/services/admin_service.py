@@ -13,10 +13,16 @@ from app.core.security import hash_password
 from app.core.utils import as_utc_timestamp
 from app.db.models.sensor_sample import SensorSample
 from app.db.models.trip import Trip
+from app.db.models.vehicle_profile import VehicleProfile
 from app.realtime.live_detector import live_alert_detector
 from app.repositories.sensor_sample_repository import SensorSampleRepository
 from app.repositories.user_repository import DriverRecord, SqlUserRepository, UserRecord
-from app.services.live_monitor_service import _accel_magnitude, _longitudinal_accel, _provisional_live_score
+from app.services.live_monitor_service import (
+    _accel_magnitude,
+    _longitudinal_accel,
+    _provisional_live_score,
+    vehicle_tuned_cfg,
+)
 from app.services.route_snap_service import RouteSnapService
 
 # A trip is "live" if its latest sample is under this age; "stale" while it
@@ -65,6 +71,17 @@ class AdminService:
         ).scalars().all()
 
         sample_repo = SensorSampleRepository(self.db)
+
+        # Batch-load vehicle profiles once so each trip's provisional score is
+        # computed with its driver's vehicle-tuned config (no N+1 lookups).
+        profile_ids = [trip.vehicle_profile_id for trip in trips if trip.vehicle_profile_id]
+        profiles: dict[str, VehicleProfile] = {}
+        if profile_ids:
+            rows = self.db.execute(
+                select(VehicleProfile).where(VehicleProfile.id.in_(profile_ids))
+            ).scalars().all()
+            profiles = {p.id: p for p in rows}
+
         results: list[dict] = []
         for trip in trips:
             samples = sample_repo.list_latest_by_trip(
@@ -89,6 +106,7 @@ class AdminService:
             elapsed_s = max(0.0, (now - started_at).total_seconds()) if started_at else 0.0
 
             counts = live_alert_detector.event_counts(trip.id)
+            cfg = vehicle_tuned_cfg(self.db, trip, profiles=profiles)
             driver = self.users.get_driver_by_id(trip.user_id)
 
             results.append(
@@ -110,7 +128,7 @@ class AdminService:
                     "samples_uploaded": sample_count,
                     "event_counts": counts,
                     "event_total": int(sum(counts.values())),
-                    "live_score": _provisional_live_score(counts, elapsed_s),
+                    "live_score": _provisional_live_score(counts, elapsed_s, cfg),
                     "connection_status": _connection_status(last_sample_age_s),
                     "last_sample_age_s": last_sample_age_s,
                 }
