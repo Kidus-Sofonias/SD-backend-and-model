@@ -30,6 +30,15 @@ class Trip(Base):
 
     user_id: Mapped[str] = mapped_column(String, ForeignKey("users.id"), nullable=False, index=True)
 
+    # Phase 3 (hackathon): the vehicle used for this trip (nullable — old trips
+    # and users without a vehicle profile have none).
+    vehicle_profile_id: Mapped[str | None] = mapped_column(
+        String,
+        ForeignKey("vehicle_profiles.id"),
+        nullable=True,
+        index=True,
+    )
+
     started_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 

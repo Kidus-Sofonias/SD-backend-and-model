@@ -9,6 +9,7 @@ from app.api.v1.routes.trips import router as trips_router
 from app.api.v1.routes.events import router as events_router
 from app.api.v1.routes.sensor_samples import router as sensor_samples_router
 from app.api.v1.routes.realtime import router as realtime_router
+from app.api.v1.routes.vehicle import router as vehicle_router
 
 
 api_v1_router = APIRouter()
@@ -19,3 +20,4 @@ api_v1_router.include_router(trips_router)
 api_v1_router.include_router(events_router, tags=["events"])
 api_v1_router.include_router(sensor_samples_router, prefix="/trips", tags=["sensor_samples"])
 api_v1_router.include_router(realtime_router, tags=["realtime"])
+api_v1_router.include_router(vehicle_router)

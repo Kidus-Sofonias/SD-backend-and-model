@@ -45,6 +45,7 @@ from app.schemas.trip import (
     TripReviewDashboardItemOut,
     TripReviewLabelIn,
     TripReviewOut,
+    TripStartRequest,
 )
 from app.services.trip_processing_service import TripProcessingService
 from app.services.route_snap_service import RouteSnapService
@@ -139,6 +140,7 @@ def active_trip(
 
 @router.post("/start", response_model=TripOut)
 def start_trip(
+    payload: TripStartRequest | None = None,
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
@@ -148,7 +150,10 @@ def start_trip(
     if active:
         raise HTTPException(status_code=400, detail="You already have an active trip")
 
-    return repo.create_trip(user_id=user.id)
+    return repo.create_trip(
+        user_id=user.id,
+        vehicle_profile_id=payload.vehicle_profile_id if payload else None,
+    )
 
 
 @router.post("/{trip_id}/end", response_model=TripOut)

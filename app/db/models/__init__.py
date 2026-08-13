@@ -7,5 +7,6 @@ from app.db.models.user import User
 from app.db.models.trip import Trip
 from app.db.models.driving_event import DrivingEvent
 from app.db.models.sensor_sample import SensorSample
+from app.db.models.vehicle_profile import VehicleProfile
 
-__all__ = ["User", "Trip", "DrivingEvent", "SensorSample"]
+__all__ = ["User", "Trip", "DrivingEvent", "SensorSample", "VehicleProfile"]

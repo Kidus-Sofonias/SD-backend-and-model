@@ -30,6 +30,7 @@ from app.db.models.driving_event import DrivingEvent
 from app.db.models.sensor_sample import SensorSample
 from app.db.models.trip import Trip
 from app.db.models.user import User
+from app.db.models.vehicle_profile import VehicleProfile
 from app.db.session import commit_with_retry
 from app.ml.auto_retrain import maybe_schedule_auto_retrain
 from app.ml.config import FeatureConfigV2
@@ -37,6 +38,7 @@ from app.ml.event_generation import build_human_reasons
 from app.ml.inference import ModelScorer
 from app.ml.pipeline import run_trip_pipeline
 from app.ml.schemas import MODEL_VERSION_RULES_V1
+from app.ml.vehicle_profiles import config_for_profile
 from app.repositories.trip_repository import SqlTripRepository
 from app.repositories.user_repository import UserRecord
 
@@ -658,7 +660,16 @@ class TripProcessingService:
         if self.db.in_transaction():
             self.db.rollback()
 
-        pipeline_result = run_trip_pipeline(sample_payload, self.cfg)
+        # Phase 3 (hackathon): vehicle-aware detection. The driver's vehicle
+        # profile tunes the event thresholds (heavier vehicles are more
+        # sensitive to longitudinal/lateral events, more tolerant of vertical
+        # motion). Falls back to the universal default when no profile exists.
+        vehicle_profile = self.db.execute(
+            select(VehicleProfile).where(VehicleProfile.user_id == user_id)
+        ).scalar_one_or_none()
+        vehicle_cfg = config_for_profile(self.cfg, vehicle_profile)
+
+        pipeline_result = run_trip_pipeline(sample_payload, vehicle_cfg)
 
         trip_features = pipeline_result["trip_features"]
         rule_score = pipeline_result["score"]
@@ -745,6 +756,7 @@ class TripProcessingService:
         persisted_breakdown = {
             "rule_score": rule_score,
             "rule_breakdown": rule_breakdown,
+            "vehicle_category": vehicle_profile.category if vehicle_profile else None,
             "ml_prediction": ml_prediction,
             "ml_risk_probability": ml_risk_probability,
             "ml_blend_weight": ml_blend_weight,
@@ -759,6 +771,7 @@ class TripProcessingService:
         }
 
         trip = self._load_trip(user_id=user_id, trip_id=trip_id)
+        trip.vehicle_profile_id = vehicle_profile.id if vehicle_profile else None
         trip.score = final_score
         trip.score_breakdown = json.dumps(persisted_breakdown)
         trip.feature_version = feature_version

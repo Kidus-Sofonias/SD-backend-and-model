@@ -16,3 +16,9 @@ class User(Base):
     role: Mapped[str] = mapped_column(String(32), nullable=False, default="driver")
 
     trips = relationship("Trip", cascade="all, delete-orphan")
+    vehicle_profile = relationship(
+        "VehicleProfile",
+        back_populates="user",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )

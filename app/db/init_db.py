@@ -89,6 +89,19 @@ def _ensure_driving_event_columns() -> None:
             connection.execute(text("ALTER TABLE driving_events ADD COLUMN duration_s FLOAT"))
 
 
+def _ensure_trip_vehicle_column() -> None:
+    """Phase 3 (hackathon): trips.vehicle_profile_id for vehicle-aware trips."""
+    inspector = inspect(engine)
+    columns = {column["name"] for column in inspector.get_columns("trips")}
+    if "vehicle_profile_id" in columns:
+        return
+
+    with engine.begin() as connection:
+        connection.execute(
+            text("ALTER TABLE trips ADD COLUMN vehicle_profile_id VARCHAR REFERENCES vehicle_profiles(id)")
+        )
+
+
 def ensure_sensor_sample_columns() -> None:
     inspector = inspect(engine)
     columns = {column["name"] for column in inspector.get_columns("sensor_samples")}
@@ -146,6 +159,7 @@ def init_db() -> None:
     _ensure_user_role_column()
     _ensure_driving_event_columns()
     _ensure_sensor_sample_columns()
+    _ensure_trip_vehicle_column()
     ensure_sensor_sample_id_sequence()
     ensure_driving_event_id_sequence()
     _seed_default_admin()

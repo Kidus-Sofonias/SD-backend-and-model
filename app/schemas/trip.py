@@ -12,8 +12,9 @@ from app.schemas.events import DrivingEventOut
 
 
 class TripStartRequest(BaseModel):
-    # keep it optional for now (frontend can send empty body)
-    pass
+    # Phase 3 (hackathon): optional vehicle used for this trip so the backend
+    # can tune detection and record vehicle context for admin replay.
+    vehicle_profile_id: str | None = None
 
 
 class TripEndRequest(BaseModel):
