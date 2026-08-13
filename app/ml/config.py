@@ -78,10 +78,14 @@ class FeatureConfigV2:
     # single-sample GPS noise spikes move speed very little; genuine maneuvers
     # (even at 2 Hz GPS) move it by metres per second.
     dv_min_speed_delta_mps: float = 2.5
-    # A short segment whose peak |dv| exceeds this (m/s^2) is kept even when
-    # the windowed net change is ~0: e.g. a panic stop caught in ONE GPS fix
-    # (60 -> 20 km/h in a single 1 Hz sample is ~11 m/s^2). Noise spikes stay
-    # below this; genuine emergency stops do not.
+    # Extreme-peak escape for short segments whose windowed net speed change is
+    # ~0 (e.g. a panic stop caught in ONE GPS fix that dips and recovers). The
+    # escape compares the peak single-sample speed change in m/s against
+    # dv_single_sample_peak_mps2 x nominal_dt_s (= 4.5 m/s): a genuine stop at
+    # 1 Hz sheds ~11 m/s and at 2 Hz ~5.5 m/s (both pass), while per-sample GPS
+    # noise (<= ~1.5 m/s in the demo) never approaches 4.5 m/s. The m/s
+    # reference is rate-independent, unlike an m/s^2 peak which grows as 1/dt
+    # for per-sample noise at higher sampling rates.
     dv_single_sample_peak_mps2: float = 9.0
     # Rough road is a continuous CONDITION, not discrete events: cooldown for
     # unstable_motion is much longer than for other categories so a bumpy

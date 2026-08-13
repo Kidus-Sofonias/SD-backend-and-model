@@ -152,11 +152,19 @@ def filter_net_speed_delta(
     reference), while per-sample GPS noise amplitude stays roughly constant
     across rates, so its m/s^2 value grows as 1/dt and would otherwise
     increasingly pass a fixed m/s^2 threshold at high sample rates.
+
+    Note this is safe at high sample rates too: a genuine stop at 10 Hz spans
+    many samples (a single 10 Hz sample would need ~45 m/s^2), so it is caught
+    by the windowed net-delta check, and single-sample segments at high rates
+    are noise -- which the m/s reference rejects.
     """
     if min_delta_mps <= 0 and extreme_peak_mps2 <= 0:
         return segments
     ref_speed_change = extreme_peak_mps2 * max(float(nominal_dt_s), 1e-9)
     n = len(speed_raw)
+    if n < 2:
+        # No speed differences exist; nothing can be a genuine maneuver.
+        return segments
     kept: list[tuple[int, int]] = []
     for s, e in segments:
         lo = max(0, s - 1)

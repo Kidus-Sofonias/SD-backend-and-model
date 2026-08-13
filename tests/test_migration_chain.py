@@ -10,6 +10,12 @@ Phase 10 also fixed the pre-existing fresh-DB chain gaps:
   init migration (so a fresh alembic upgrade broke at 20260723 on SQLite).
 - ``if_not_exists=True`` in op.add_column is a SQLite syntax error; both
   20260723 and 20260813 now inspect the live schema before adding columns.
+
+This test assumes ``app.core.config.settings.database_url`` is driven by the
+``DATABASE_URL`` env var (validated against the app's session setup); if that
+env-var name ever changes, the subprocess would target the wrong database and
+the sqlite3.connect() below would fail loudly, so the test can never silently
+pass against the wrong target.
 """
 
 from __future__ import annotations

@@ -79,6 +79,12 @@ def upgrade() -> None:
     sa.ForeignKeyConstraint(['user_id'], ['users.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
+    # Match the model's index=True columns (id, user_id, trip_id, ts) plus the
+    # composite indexes from __table_args__.
+    op.create_index(op.f('ix_sensor_samples_id'), 'sensor_samples', ['id'], unique=False)
+    op.create_index(op.f('ix_sensor_samples_user_id'), 'sensor_samples', ['user_id'], unique=False)
+    op.create_index(op.f('ix_sensor_samples_trip_id'), 'sensor_samples', ['trip_id'], unique=False)
+    op.create_index(op.f('ix_sensor_samples_ts'), 'sensor_samples', ['ts'], unique=False)
     op.create_index(op.f('ix_sensor_samples_trip_ts'), 'sensor_samples', ['trip_id', 'ts'], unique=False)
     op.create_index(op.f('ix_sensor_samples_user_trip'), 'sensor_samples', ['user_id', 'trip_id'], unique=False)
     # ### end Alembic commands ###
@@ -98,5 +104,9 @@ def downgrade() -> None:
     op.drop_table('users')
     op.drop_index(op.f('ix_sensor_samples_user_trip'), table_name='sensor_samples')
     op.drop_index(op.f('ix_sensor_samples_trip_ts'), table_name='sensor_samples')
+    op.drop_index(op.f('ix_sensor_samples_ts'), table_name='sensor_samples')
+    op.drop_index(op.f('ix_sensor_samples_trip_id'), table_name='sensor_samples')
+    op.drop_index(op.f('ix_sensor_samples_user_id'), table_name='sensor_samples')
+    op.drop_index(op.f('ix_sensor_samples_id'), table_name='sensor_samples')
     op.drop_table('sensor_samples')
     # ### end Alembic commands ###
