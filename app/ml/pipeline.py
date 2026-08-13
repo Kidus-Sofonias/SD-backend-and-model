@@ -10,11 +10,16 @@ from .preprocessing import preprocess_samples
 from .features import compute_per_sample_features, aggregate_trip_features
 from .scoring_rules import score_trip_rules_v3
 from .schemas import FEATURE_VERSION, MODEL_VERSION_RULES_V1
+from .vehicle_profiles import vehicle_feature_row
 
 MODEL_VERSION = MODEL_VERSION_RULES_V1
 
 
-def run_trip_pipeline(samples: List[Dict[str, Any]], cfg: FeatureConfigV2) -> Dict[str, Any]:
+def run_trip_pipeline(
+    samples: List[Dict[str, Any]],
+    cfg: FeatureConfigV2,
+    vehicle_profile: Any = None,
+) -> Dict[str, Any]:
     df = preprocess_samples(samples, cfg.max_gap_s, cfg.ema_alpha, cfg.input_speed_unit)
     if df.empty or len(df) < cfg.min_samples_for_scoring:
         # not enough data to score
@@ -110,6 +115,11 @@ def run_trip_pipeline(samples: List[Dict[str, Any]], cfg: FeatureConfigV2) -> Di
         overspeed_severity_ref_mps=cfg.overspeed_severity_ref_mps,
         severe_overspeed_severity_ref_mps=cfg.severe_overspeed_severity_ref_mps,
     )
+
+    # Phase 8b: merge the vehicle context into the feature dict so the model
+    # contract (FEATURE_COLUMNS_FV1) is complete for every trip — defaulting
+    # to the universal 1400 kg reference when no vehicle profile exists.
+    trip_features.update(vehicle_feature_row(vehicle_profile))
 
     return {
         "feature_version": FEATURE_VERSION,

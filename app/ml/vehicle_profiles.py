@@ -24,6 +24,7 @@ Scaling rationale (documented, not arbitrary):
 from __future__ import annotations
 
 import dataclasses
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -137,3 +138,27 @@ def category_options() -> list[dict[str, str]]:
         {"key": params.key, "label": params.label, "mass_kg": str(params.mass_kg)}
         for params in VEHICLE_CATEGORIES.values()
     ]
+
+
+# ---------------------------------------------------------------------------
+# Vehicle-aware model features (Phase 8b)
+# ---------------------------------------------------------------------------
+
+def vehicle_feature_row(profile: Any) -> dict[str, float]:
+    """Model features that carry the trip's vehicle context.
+
+    ``log_vehicle_mass_kg`` lets the model condition its risk reading on the
+    vehicle class: the same event counts mean different things for a sedan and
+    a 36 t tractor-trailer because detection thresholds are tuned per vehicle.
+    Falls back to the universal reference mass (1400 kg sedan) so trips
+    without a vehicle profile produce the same features the rules assume.
+    """
+    if profile is None or not getattr(profile, "category", None):
+        mass_kg = REFERENCE_MASS_KG
+    else:
+        mass_kg = resolve_mass_kg(
+            profile.category,
+            size_class=getattr(profile, "size_class", None),
+            mass_kg=getattr(profile, "mass_kg", None),
+        )
+    return {"log_vehicle_mass_kg": round(math.log10(max(float(mass_kg), 1.0)), 4)}

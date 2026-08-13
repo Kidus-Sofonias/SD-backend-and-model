@@ -669,7 +669,14 @@ class TripProcessingService:
         ).scalar_one_or_none()
         vehicle_cfg = config_for_profile(self.cfg, vehicle_profile)
 
-        pipeline_result = run_trip_pipeline(sample_payload, vehicle_cfg)
+        # Phase 8b: pass the profile into the pipeline so the persisted
+        # trip_features include log_vehicle_mass_kg — the model contract
+        # (FEATURE_COLUMNS_FV1) expects it for every scored trip.
+        pipeline_result = run_trip_pipeline(
+            sample_payload,
+            vehicle_cfg,
+            vehicle_profile=vehicle_profile,
+        )
 
         trip_features = pipeline_result["trip_features"]
         rule_score = pipeline_result["score"]

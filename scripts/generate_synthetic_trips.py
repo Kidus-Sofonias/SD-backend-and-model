@@ -33,6 +33,7 @@ import json
 import math
 import random
 import sys
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -43,11 +44,13 @@ if str(BACKEND_ROOT) not in sys.path:
 
 from sqlalchemy import func, select
 
+from app.core.security import hash_password
 from app.db.session import SessionLocal
 from app.db.models.user import User
 from app.db.models.driving_event import DrivingEvent
 from app.db.models.trip import Trip
 from app.db.models.sensor_sample import SensorSample
+from app.db.models.vehicle_profile import VehicleProfile
 
 DEFAULT_TOTAL_TRIPS = 50
 DEFAULT_DT_SECONDS = 0.3  # Sampling rate (~3 Hz)
@@ -601,12 +604,14 @@ def create_trip_with_samples(
     rows: list[dict],
     started_at: datetime,
     dt_s: float,
+    vehicle_profile_id: str | None = None,
 ) -> str:
     trip = Trip(
         user_id=user_id,
         started_at=started_at,
         ended_at=started_at + timedelta(seconds=dt_s * len(rows)),
         status="completed",
+        vehicle_profile_id=vehicle_profile_id,
     )
     db.add(trip)
     db.flush()
@@ -668,6 +673,42 @@ def count_completed_trips(db) -> int:
 
 
 # =====================================================================
+# Vehicle-aware fleet (Phase 8b)
+# =====================================================================
+
+SYNTH_VEHICLE_EMAIL = "synth.{category}@drivepulse.test"
+SYNTH_VEHICLE_PASSWORD = "synth1234"
+
+
+def ensure_synth_vehicle_driver(db, category: str) -> tuple[str, str]:
+    """Create (or reuse) a synthetic driver with a VehicleProfile for category.
+
+    Returns (user_id, vehicle_profile_id). One driver per category keeps the
+    trips' vehicle context stable and lets build_training_dataset score each
+    trip through its own tuned config (config_for_profile).
+    """
+    email = SYNTH_VEHICLE_EMAIL.format(category=category)
+    user = db.execute(select(User).where(User.email == email)).scalar_one_or_none()
+    if user is None:
+        user = User(
+            id=str(uuid.uuid4()),
+            email=email,
+            password_hash=hash_password(SYNTH_VEHICLE_PASSWORD),
+            role="driver",
+        )
+        db.add(user)
+        db.flush()
+    profile = db.execute(
+        select(VehicleProfile).where(VehicleProfile.user_id == user.id)
+    ).scalar_one_or_none()
+    if profile is None:
+        profile = VehicleProfile(user_id=user.id, category=category)
+        db.add(profile)
+        db.flush()
+    return user.id, profile.id
+
+
+# =====================================================================
 # Main generator entry point
 # =====================================================================
 
@@ -679,6 +720,7 @@ def generate_synthetic_trips(
     dt: float = DEFAULT_DT_SECONDS,
     seed: int = 42,
     strong_labels: bool = True,
+    vehicle_categories: list[str] | None = None,
 ) -> dict[str, object]:
     """
     Generate synthetic trips with realistic variable durations and start times.
@@ -689,6 +731,12 @@ def generate_synthetic_trips(
     strong_labels=True: Only generate safe_profile (label 0) and risky_profile
     (label 1) — skip moderate trips.  Saves ground-truth labels separately so
     the dataset builder can use them as strong labels instead of weak rule labels.
+
+    vehicle_categories (Phase 8b): when provided, creates a synthetic fleet of
+    drivers — one per category, each with a VehicleProfile — and distributes
+    the trips round-robin across them. Every trip then carries a
+    vehicle_profile_id so the training dataset is built through the
+    vehicle-aware detection signal (config_for_profile per trip).
     """
     if count <= 0:
         return {
@@ -700,6 +748,7 @@ def generate_synthetic_trips(
             "dt": dt,
             "seed": seed,
             "user_id": user_id,
+            "vehicle_categories": vehicle_categories,
             "created_trip_ids": [],
             "synthetic_labels_path": str(SYNTHETIC_LABELS_PATH),
         }
@@ -708,7 +757,24 @@ def generate_synthetic_trips(
 
     db = SessionLocal()
     try:
-        resolved_user_id = resolve_user_id(db, user_id)
+        # Phase 8b: resolve the trip owners first. With vehicle_categories the
+        # trips are spread across a synthetic fleet (one driver per category);
+        # otherwise they all go to the single resolved user (backward compat).
+        if vehicle_categories:
+            fleet: list[tuple[str, str]] = [
+                ensure_synth_vehicle_driver(db, category)
+                for category in vehicle_categories
+            ]
+            resolved_user_id = fleet[0][0]
+        else:
+            fleet = []
+            resolved_user_id = resolve_user_id(db, user_id)
+
+        def _owner_for(index: int) -> tuple[str, str | None]:
+            """(user_id, vehicle_profile_id) for the trip at generation index."""
+            if not fleet:
+                return resolved_user_id, None
+            return fleet[index % len(fleet)]
 
         if strong_labels:
             # Only safe + risky extremes — no moderate ambiguity
@@ -736,12 +802,16 @@ def generate_synthetic_trips(
 
         # Safe trips
         for _ in range(safe_count):
+            owner_user_id, owner_profile_id = _owner_for(trip_index)
             n_samp = pick_trip_duration(samples_per_trip=samples_per_trip)
             started_at = trip_times[trip_index] if trip_index < len(trip_times) else (
                 now - timedelta(days=trip_index + 1, minutes=random.randint(0, 120))
             )
             rows = generate_safe_profile(n_samp, dt)
-            trip_id = create_trip_with_samples(db, resolved_user_id, rows, started_at, dt)
+            trip_id = create_trip_with_samples(
+                db, owner_user_id, rows, started_at, dt,
+                vehicle_profile_id=owner_profile_id,
+            )
             created_trip_ids.append((trip_id, "safe"))
             synthetic_labels[trip_id] = 0
             strong_ground_truth[trip_id] = 0
@@ -749,24 +819,32 @@ def generate_synthetic_trips(
 
         # Moderate trips (only when strong_labels=False)
         for _ in range(moderate_count):
+            owner_user_id, owner_profile_id = _owner_for(trip_index)
             n_samp = pick_trip_duration(samples_per_trip=samples_per_trip)
             started_at = trip_times[trip_index] if trip_index < len(trip_times) else (
                 now - timedelta(days=trip_index + 1, minutes=random.randint(0, 120))
             )
             rows = generate_moderate_profile(n_samp, dt)
-            trip_id = create_trip_with_samples(db, resolved_user_id, rows, started_at, dt)
+            trip_id = create_trip_with_samples(
+                db, owner_user_id, rows, started_at, dt,
+                vehicle_profile_id=owner_profile_id,
+            )
             created_trip_ids.append((trip_id, "moderate"))
             synthetic_labels[trip_id] = 0
             trip_index += 1
 
         # Risky trips
         for _ in range(risky_count):
+            owner_user_id, owner_profile_id = _owner_for(trip_index)
             n_samp = pick_trip_duration(samples_per_trip=samples_per_trip)
             started_at = trip_times[trip_index] if trip_index < len(trip_times) else (
                 now - timedelta(days=trip_index + 1, minutes=random.randint(0, 120))
             )
             rows = generate_risky_profile(n_samp, dt)
-            trip_id = create_trip_with_samples(db, resolved_user_id, rows, started_at, dt)
+            trip_id = create_trip_with_samples(
+                db, owner_user_id, rows, started_at, dt,
+                vehicle_profile_id=owner_profile_id,
+            )
             created_trip_ids.append((trip_id, "risky"))
             synthetic_labels[trip_id] = 1
             strong_ground_truth[trip_id] = 1
@@ -792,6 +870,7 @@ def generate_synthetic_trips(
             "dt": dt,
             "seed": seed,
             "user_id": resolved_user_id,
+            "vehicle_categories": vehicle_categories,
             "created_trip_ids": created_trip_ids,
             "synthetic_labels_path": str(SYNTHETIC_LABELS_PATH),
         }
@@ -812,7 +891,16 @@ def main():
     parser.add_argument("--strong-labels", action="store_true", default=True,
                         help="Generate only safe+risky extremes (no moderate) with ground-truth labels")
     parser.add_argument("--no-strong-labels", dest="strong_labels", action="store_false")
+    parser.add_argument("--vehicle-categories", type=str, default=None,
+                        help="Comma-separated vehicle categories for a synthetic fleet "
+                             "(e.g. sedan,suv,pickup,van,bus,heavy_truck,tractor_trailer). "
+                             "Each trip gets a vehicle profile so the dataset is built through "
+                             "the vehicle-aware detection signal.")
     args = parser.parse_args()
+
+    vehicle_categories = None
+    if args.vehicle_categories:
+        vehicle_categories = [c.strip() for c in args.vehicle_categories.split(",") if c.strip()]
 
     result = generate_synthetic_trips(
         count=args.count,
@@ -821,6 +909,7 @@ def main():
         dt=args.dt,
         seed=args.seed,
         strong_labels=args.strong_labels,
+        vehicle_categories=vehicle_categories,
     )
 
     print(f"Generated {result['created_count']} synthetic trips for user {result['user_id']}")
@@ -832,6 +921,8 @@ def main():
     else:
         print(f"Samples/trip:   {result['samples_per_trip']}")
     print(f"Synthetic label registry updated at: {result['synthetic_labels_path']}")
+    if result.get("vehicle_categories"):
+        print(f"Vehicle fleet:   {', '.join(result['vehicle_categories'])}")
     print("Example trip IDs:")
     for trip_id, label in list(result["created_trip_ids"])[:10]:
         print(f"  {trip_id} -> {label}")
