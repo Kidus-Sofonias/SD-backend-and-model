@@ -48,6 +48,13 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./sdbackend.db"
     auto_retrain_enabled: bool = False
     auto_retrain_trip_interval: int = 100
+    # Review-gated retraining (hackathon): also retrain when the number of
+    # trips with REAL human review labels (admin review screen) crosses this
+    # threshold, then again at every +auto_retrain_trip_interval reviewed
+    # trips. Human-reviewed labels are the strongest signal in the training
+    # dataset, so retraining on review milestones makes the model more
+    # powerful over time. 0 disables the review trigger.
+    auto_retrain_min_reviewed: int = 30
     auto_retrain_skip_tests: bool = True
     route_snap_enabled: bool = True
     route_snap_base_url: str = "https://router.project-osrm.org"

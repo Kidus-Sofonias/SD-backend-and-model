@@ -24,6 +24,7 @@ from sqlalchemy import select
 
 from app.db.models.trip import Trip
 from app.db.session import SessionLocal
+from app.ml.labels import review_label_tier
 from app.ml.model_registry import get_production_model_version, model_path_for
 from app.ml.schemas import FEATURE_COLUMNS_FV1, FEATURE_VERSION
 from scripts.reporting_utils import (
@@ -56,10 +57,9 @@ def _load_breakdown(trip: Trip) -> dict[str, Any]:
 
 
 def _review_label_tier(reviewed_label_source: str | None) -> str:
-    source = (reviewed_label_source or "reviewed_real").strip().lower()
-    if "synthetic" in source:
-        return "reviewed_synthetic"
-    return "reviewed_real"
+    # Delegates to the shared classifier so demo/synthetic/real stay consistent
+    # across the dataset builder, this analysis, and the retrain counter.
+    return review_label_tier(reviewed_label_source)
 
 
 def load_reviewed_trip_rows(*, include_synthetic: bool = False) -> list[dict[str, Any]]:
@@ -75,7 +75,8 @@ def load_reviewed_trip_rows(*, include_synthetic: bool = False) -> list[dict[str
         rows: list[dict[str, Any]] = []
         for trip in trips:
             label_tier = _review_label_tier(trip.reviewed_label_source)
-            if label_tier == "reviewed_synthetic" and not include_synthetic:
+            # Demo reviews are score-derived showcase labels, never ground truth.
+            if label_tier in ("reviewed_synthetic", "reviewed_demo") and not include_synthetic:
                 continue
 
             breakdown = _load_breakdown(trip)
@@ -151,6 +152,7 @@ def build_reviewed_model_analysis(
         "row_count": int(len(df)),
         "reviewed_real_row_count": int((df.get("label_tier") == "reviewed_real").sum()) if "label_tier" in df else 0,
         "reviewed_synthetic_row_count": int((df.get("label_tier") == "reviewed_synthetic").sum()) if "label_tier" in df else 0,
+        "reviewed_demo_row_count": int((df.get("label_tier") == "reviewed_demo").sum()) if "label_tier" in df else 0,
         "model_version": None if df.empty else df["model_version"].iloc[0],
         "feature_version": None if df.empty else df["feature_version"].iloc[0],
         "mistake_count": int(len(mistake_log)),
@@ -195,7 +197,7 @@ def export_reviewed_model_analysis(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Export reviewed-trip mistakes and analysis for the current model")
     parser.add_argument("--model-version", required=False, help="Model version to analyze")
-    parser.add_argument("--include-synthetic", action="store_true", help="Include reviewed synthetic labels")
+    parser.add_argument("--include-synthetic", action="store_true", help="Include reviewed synthetic AND demo labels (excluded by default)")
     parser.add_argument("--threshold", type=float, default=0.5, help="Probability threshold used for disagreement/error reporting")
     parser.add_argument(
         "--thresholds",

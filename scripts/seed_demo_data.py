@@ -288,7 +288,13 @@ def seed_demo_data(
         print(f"  [DONE] Finalized {success_count}/{len(finalized)} trips")
 
         # ==============================================================
-        # 5.  Apply review labels (admin reviews ~70% of trips)
+        # 5.  Apply DEMO review labels (admin reviews ~70% of trips)
+        #
+        # These showcase the admin review workflow. The label is derived from
+        # the trip score, so it carries NO independent ground-truth signal:
+        # it is stored as ``demo_review`` so dataset builders and the review
+        # analysis treat it as a demo tier, never as real human review.
+        # Real human reviews come from the admin UI (source "human_review").
         # ==============================================================
         reviewable = [f for f in finalized if f["result"] is not None]
         random.shuffle(reviewable)
@@ -321,7 +327,7 @@ def seed_demo_data(
                     actor=admin_record,
                     trip_id=item["trip_id"],
                     reviewed_label=label,
-                    reviewed_label_source="human_review",
+                    reviewed_label_source="demo_review",
                     review_notes=notes,
                 )
                 review_labels.append({

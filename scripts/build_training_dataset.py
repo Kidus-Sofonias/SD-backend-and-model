@@ -36,6 +36,7 @@ from app.db.session import SessionLocal
 from app.db.models.trip import Trip
 from app.db.models.sensor_sample import SensorSample
 from app.ml.config import FeatureConfigV2
+from app.ml.labels import review_label_tier
 from app.ml.pipeline import run_trip_pipeline
 from app.ml.schemas import FEATURE_VERSION
 from scripts.reporting_utils import build_dataset_summary
@@ -103,14 +104,13 @@ def choose_label(
     Label priority (highest to lowest):
       1. Human-reviewed label (trip.reviewed_label or reviewed_labels registry)
       2. Synthetic ground-truth label (strong_labels — from generator, known ground truth)
-      3. Weak rule-based label (from rule_score — useful when ground truth unknown)
-      4. Synthetic bootstrap label (from old synthetic_registry — lowest confidence)
+      3. Demo review label (seed script — score-derived showcase labels, NOT human ground truth)
+      4. Weak rule-based label (from rule_score — useful when ground truth unknown)
+      5. Synthetic bootstrap label (from old synthetic_registry — lowest confidence)
     """
     if trip.reviewed_label is not None:
         reviewed_source = (trip.reviewed_label_source or "reviewed_real").strip() or "reviewed_real"
-        if "synthetic" in reviewed_source.lower():
-            return int(trip.reviewed_label), reviewed_source, "reviewed_synthetic"
-        return int(trip.reviewed_label), reviewed_source, "reviewed_real"
+        return int(trip.reviewed_label), reviewed_source, review_label_tier(trip.reviewed_label_source)
 
     if trip.id in reviewed_labels:
         return reviewed_labels[trip.id], "reviewed_registry", "reviewed_real"
@@ -141,6 +141,9 @@ def select_rows_for_training(rows: list[dict]) -> tuple[list[dict], dict[str, di
         "reviewed_real",
         "reviewed_synthetic",
         "synthetic_ground_truth",  # Ground-truth from generator — stronger than weak rules
+        # Demo reviews are score-derived showcase labels from the seed script;
+        # they rank below generator ground truth but above weak rule labels.
+        "reviewed_demo",
         "weak_label",
         "synthetic_bootstrap",
     ]
