@@ -179,6 +179,112 @@ def test_admin_trip_telemetry_rejects_non_admin_and_missing_trip(tmp_path: Path)
         app.dependency_overrides.clear()
 
 
+def test_admin_trip_samples_returns_full_sensor_timeline(tmp_path: Path) -> None:
+    """Replay: admins can fetch any driver's raw sensor timeline."""
+    session_factory = _make_session_factory(tmp_path)
+    driver = UserRecord(id=str(uuid.uuid4()), email="replay-driver@example.com", password_hash="hashed")
+    admin = UserRecord(id=str(uuid.uuid4()), email="replay-admin@example.com", password_hash="hashed", role="admin")
+
+    with session_factory() as db:
+        db.add(User(id=driver.id, email=driver.email, password_hash=driver.password_hash, role=driver.role))
+        db.add(User(id=admin.id, email=admin.email, password_hash=admin.password_hash, role=admin.role))
+        db.commit()
+
+    driver_client = _client_with_overrides(session_factory, driver)
+    try:
+        trip_id = driver_client.post("/api/v1/trips/start").json()["id"]
+        upload = driver_client.post(f"/api/v1/trips/{trip_id}/samples", json={"samples": _samples(5)})
+        assert upload.status_code == 200
+    finally:
+        driver_client.close()
+        app.dependency_overrides.clear()
+
+    # Driver can read their own samples (driver-side replay).
+    driver_client = _client_with_overrides(session_factory, driver)
+    try:
+        res = driver_client.get(f"/api/v1/trips/{trip_id}/samples")
+        assert res.status_code == 200
+        payload = res.json()
+        assert payload["trip_id"] == trip_id
+        assert payload["count"] == 5
+        assert len(payload["samples"]) == 5
+        first = payload["samples"][0]
+        assert first["speed_mps"] == 22.0
+        assert first["az"] == 9.8
+        assert first["gz"] == 0.01
+    finally:
+        driver_client.close()
+        app.dependency_overrides.clear()
+
+    # Admin can read ANY driver's samples, oldest-first (replay/forensics).
+    admin_client = _client_with_overrides(session_factory, admin)
+    try:
+        res = admin_client.get(f"/api/v1/admin/trips/{trip_id}/samples")
+        assert res.status_code == 200
+        payload = res.json()
+        assert payload["count"] == 5
+        timestamps = [s["ts"] for s in payload["samples"]]
+        assert timestamps == sorted(timestamps), "samples must be oldest-first for replay"
+    finally:
+        admin_client.close()
+        app.dependency_overrides.clear()
+
+    # Non-admin is rejected from the admin samples endpoint.
+    driver_client = _client_with_overrides(session_factory, driver)
+    try:
+        res = driver_client.get(f"/api/v1/admin/trips/{trip_id}/samples")
+        assert res.status_code == 403
+    finally:
+        driver_client.close()
+        app.dependency_overrides.clear()
+
+
+def test_telemetry_includes_lateral_and_vertical_accel(tmp_path: Path) -> None:
+    """3D vehicle feed: telemetry exposes signed lateral (speed*gz) and
+    gravity-free vertical (az - g) acceleration on top of the existing fields."""
+    session_factory = _make_session_factory(tmp_path)
+    driver = UserRecord(id=str(uuid.uuid4()), email="accel-driver@example.com", password_hash="hashed")
+
+    with session_factory() as db:
+        db.add(User(id=driver.id, email=driver.email, password_hash=driver.password_hash))
+        db.commit()
+
+    client = _client_with_overrides(session_factory, driver)
+    try:
+        trip_id = client.post("/api/v1/trips/start").json()["id"]
+        base_ts = datetime(2026, 8, 8, 11, 0, 0, tzinfo=timezone.utc)
+        samples = [
+            {
+                "timestamp": (base_ts + timedelta(seconds=i)).isoformat().replace("+00:00", "Z"),
+                "speed": 20.0 if i == 0 else 18.0,
+                "lat": 9.02,
+                "lon": 38.74,
+                "accuracy_m": 5.0,
+                "ax": 0.2,
+                "ay": 0.3,
+                "az": 11.1,
+                "gx": 0.0,
+                "gy": 0.0,
+                "gz": 0.25,
+            }
+            for i in range(2)
+        ]
+        upload = client.post(f"/api/v1/trips/{trip_id}/samples", json={"samples": samples})
+        assert upload.status_code == 200
+
+        telemetry = client.get(f"/api/v1/trips/{trip_id}/telemetry").json()
+        latest = telemetry["latest"]
+        # speed 18 * gz 0.25 = 4.5 m/s^2 signed lateral
+        assert latest["lateral_accel_mps2"] == 4.5
+        # az 11.1 - 9.81 = 1.29 m/s^2 vertical (gravity removed)
+        assert latest["vertical_accel_mps2"] is not None
+        assert abs(latest["vertical_accel_mps2"] - 1.29) < 1e-9
+        assert latest["longitudinal_accel_mps2"] is not None
+    finally:
+        client.close()
+        app.dependency_overrides.clear()
+
+
 def test_admin_live_trips_rejects_non_admin(tmp_path: Path) -> None:
     session_factory = _make_session_factory(tmp_path)
     driver = UserRecord(id=str(uuid.uuid4()), email="plain-driver@example.com", password_hash="hashed")

@@ -49,6 +49,23 @@ def get_admin_trip_telemetry(
     return service.get_live_trip_telemetry(actor=user, trip_id=trip_id)
 
 
+@router.get("/trips/{trip_id}/samples")
+def get_admin_trip_samples(
+    trip_id: str,
+    limit: int = Query(default=3000, ge=1, le=10000),
+    db: Session = Depends(get_db),
+    users: SqlUserRepository = Depends(get_users_repo),
+    user=Depends(get_current_user),
+):
+    """Raw sensor timeline for ANY trip (admin only, replay/forensics).
+
+    Feeds the synchronized admin replay: 3D vehicle + speed/accel traces +
+    event positions scrubbed on one timeline.
+    """
+    service = AdminService(db, users)
+    return service.get_trip_samples(actor=user, trip_id=trip_id, limit=limit)
+
+
 @router.get("/trips/live")
 def list_live_trips(
     db: Session = Depends(get_db),

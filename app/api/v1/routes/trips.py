@@ -276,6 +276,44 @@ def get_trip_route(
     )
 
 
+@router.get("/{trip_id}/samples")
+def get_trip_samples(
+    trip_id: str,
+    limit: int = Query(default=3000, ge=1, le=10000),
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """Raw sensor timeline for the caller's own trip (replay).
+
+    Returns the full per-sample timeline (speed, GPS, IMU axes) so the app can
+    drive a synchronized replay: 3D vehicle motion, speed/acceleration traces
+    and event positions on one scrubber. This is the driver-side twin of the
+    admin samples endpoint.
+    """
+    repo = SqlTripRepository(db)
+    trip = repo.get_by_id(trip_id=trip_id, user_id=user.id)
+    if not trip:
+        raise HTTPException(status_code=404, detail="Trip not found")
+
+    sample_repo = SensorSampleRepository(db)
+    rows = sample_repo.list_by_trip(user_id=user.id, trip_id=trip_id, limit=limit)
+    samples = [
+        {
+            "ts": as_utc_timestamp(sample.ts),
+            "speed_mps": sample.speed_mps,
+            "lat": sample.lat,
+            "lon": sample.lon,
+            "accuracy_m": sample.accuracy_m,
+            "ax": sample.ax,
+            "ay": sample.ay,
+            "az": sample.az,
+            "gz": sample.gz,
+        }
+        for sample in rows
+    ]
+    return {"trip_id": trip.id, "count": len(samples), "samples": samples}
+
+
 @router.get("/{trip_id}/summary", response_model=TripDetailOut)
 def trip_summary(
     trip_id: str,

@@ -128,6 +128,35 @@ def _longitudinal_accel(prev, latest) -> float | None:
     return (latest.speed_mps - prev.speed_mps) / dt
 
 
+def _lateral_accel(latest) -> float | None:
+    """Signed lateral acceleration proxy (m/s^2): speed * yaw-rate (gz).
+
+    Mirrors the offline pipeline's lateral proxy (``speed_s * gz_s``) so the
+    3D vehicle leans the same way the event detector reads the turn. Signed so
+    the visualization knows which direction the body rolls. Returns None when
+    either input is missing.
+    """
+    if latest is None:
+        return None
+    if latest.speed_mps is None or latest.gz is None:
+        return None
+    return float(latest.speed_mps) * float(latest.gz)
+
+
+def _vertical_accel(latest) -> float | None:
+    """Dynamic vertical acceleration (m/s^2), gravity removed.
+
+    The phone's z-axis includes ~9.81 m/s^2 of gravity when roughly level, so
+    the bounce/suspension signal is the deviation from g (az - 9.81). Positive
+    = upward jolt (bump crest), negative = downward dip. Only valid while the
+    phone stays reasonably level; the 3D view treats it as a soft suspension
+    input, not a precise measurement.
+    """
+    if latest is None or latest.az is None:
+        return None
+    return float(latest.az) - 9.81
+
+
 class LiveMonitorService:
     def __init__(self, db: Session) -> None:
         self.db = db
@@ -160,12 +189,19 @@ class LiveMonitorService:
         recent_alerts = live_alert_detector.recent_alerts(trip_id)
         cfg = vehicle_tuned_cfg(self.db, trip)
 
+        vehicle_category = None
+        profile_id = getattr(trip, "vehicle_profile_id", None)
+        if profile_id:
+            profile = self.db.get(VehicleProfile, profile_id)
+            vehicle_category = profile.category if profile else None
+
         return {
             "trip_id": trip.id,
             "status": trip.status,
             "started_at": started_at.isoformat() if started_at else None,
             "elapsed_s": round(elapsed_s, 1),
             "samples_uploaded": sample_count,
+            "vehicle_category": vehicle_category,
             "latest": {
                 "ts": latest.ts.isoformat() if latest and latest.ts is not None else None,
                 "speed_mps": latest.speed_mps if latest else None,
@@ -174,6 +210,8 @@ class LiveMonitorService:
                 "accuracy_m": latest.accuracy_m if latest else None,
                 "accel_mag_mps2": _accel_magnitude(latest),
                 "longitudinal_accel_mps2": _longitudinal_accel(prev, latest),
+                "lateral_accel_mps2": _lateral_accel(latest),
+                "vertical_accel_mps2": _vertical_accel(latest),
             },
             "live_score": _provisional_live_score(counts, elapsed_s, cfg),
             "event_counts": counts,

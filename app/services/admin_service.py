@@ -19,8 +19,10 @@ from app.repositories.sensor_sample_repository import SensorSampleRepository
 from app.repositories.user_repository import DriverRecord, SqlUserRepository, UserRecord
 from app.services.live_monitor_service import (
     _accel_magnitude,
+    _lateral_accel,
     _longitudinal_accel,
     _provisional_live_score,
+    _vertical_accel,
     vehicle_tuned_cfg,
 )
 from app.services.route_snap_service import RouteSnapService
@@ -109,11 +111,13 @@ class AdminService:
             cfg = vehicle_tuned_cfg(self.db, trip, profiles=profiles)
             driver = self.users.get_driver_by_id(trip.user_id)
 
+            profile = profiles.get(trip.vehicle_profile_id) if trip.vehicle_profile_id else None
             results.append(
                 {
                     "trip_id": trip.id,
                     "driver_user_id": trip.user_id,
                     "driver_email": driver.email if driver else None,
+                    "vehicle_category": profile.category if profile else None,
                     "started_at": started_at.isoformat() if started_at else None,
                     "elapsed_s": round(elapsed_s, 1),
                     "latest": {
@@ -124,6 +128,8 @@ class AdminService:
                         "accuracy_m": latest.accuracy_m if latest else None,
                         "accel_mag_mps2": _accel_magnitude(latest),
                         "longitudinal_accel_mps2": _longitudinal_accel(prev, latest),
+                        "lateral_accel_mps2": _lateral_accel(latest),
+                        "vertical_accel_mps2": _vertical_accel(latest),
                     },
                     "samples_uploaded": sample_count,
                     "event_counts": counts,
@@ -374,6 +380,41 @@ class AdminService:
             email=email,
             password_hash=password_hash,
         )
+
+    def get_trip_samples(self, actor: UserRecord, trip_id: str, limit: int = 3000) -> dict:
+        """Raw sensor timeline for ANY trip (admin only, replay/forensics).
+
+        Returns the per-sample timeline (speed, GPS, IMU axes) so the admin
+        replay UI can scrub through the trip with the 3D vehicle, sensor
+        traces and events synchronized to the same clock.
+        """
+        self._require_admin(actor)
+        trip = self.db.execute(
+            select(Trip).where(Trip.id == trip_id)
+        ).scalar_one_or_none()
+        if trip is None:
+            raise NotFoundError(message_key="trip.not_found")
+
+        rows = SensorSampleRepository(self.db).list_by_trip(
+            user_id=trip.user_id,
+            trip_id=trip.id,
+            limit=limit,
+        )
+        samples = [
+            {
+                "ts": as_utc_timestamp(sample.ts),
+                "speed_mps": sample.speed_mps,
+                "lat": sample.lat,
+                "lon": sample.lon,
+                "accuracy_m": sample.accuracy_m,
+                "ax": sample.ax,
+                "ay": sample.ay,
+                "az": sample.az,
+                "gz": sample.gz,
+            }
+            for sample in rows
+        ]
+        return {"trip_id": trip.id, "count": len(samples), "samples": samples}
 
     def get_trip_route(self, actor: UserRecord, trip_id: str) -> dict:
         """Get route for ANY trip (admin only, no driver_id needed)."""
