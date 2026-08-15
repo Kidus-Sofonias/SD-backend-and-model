@@ -148,6 +148,26 @@ def _resync_table_id_sequence(table_name: str) -> None:
         )
 
 
+def ensure_vehicle_profile_columns() -> None:
+    """Phase 3b (hackathon): onboarding fields that tune detection further.
+    Non-destructive; existing profiles keep working with nulls."""
+    inspector = inspect(engine)
+    columns = {column["name"] for column in inspector.get_columns("vehicle_profiles")}
+
+    additions = {
+        "transmission": "VARCHAR(16)",
+        "phone_placement": "VARCHAR(24)",
+        "load_level": "VARCHAR(16)",
+        "road_context": "VARCHAR(16)",
+    }
+    with engine.begin() as connection:
+        for name, sql_type in additions.items():
+            if name not in columns:
+                connection.execute(
+                    text(f"ALTER TABLE vehicle_profiles ADD COLUMN {name} {sql_type}")
+                )
+
+
 def ensure_sensor_sample_id_sequence() -> None:
     _resync_table_id_sequence("sensor_samples")
 
@@ -165,6 +185,7 @@ def init_db() -> None:
     _ensure_driving_event_columns()
     _ensure_sensor_sample_columns()
     _ensure_trip_vehicle_column()
+    ensure_vehicle_profile_columns()
     ensure_sensor_sample_id_sequence()
     ensure_driving_event_id_sequence()
     _seed_default_admin()

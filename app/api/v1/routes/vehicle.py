@@ -55,13 +55,18 @@ def upsert_vehicle_profile(
     profile.make_model = payload.make_model
     profile.size_class = payload.size_class
     profile.drive_type = payload.drive_type
-    # Persist the curated mass (category default refined by size class) so the
-    # client and 3D simulation read one source of truth.
+    profile.transmission = payload.transmission
+    profile.phone_placement = payload.phone_placement
+    profile.load_level = payload.load_level
+    profile.road_context = payload.road_context
+    # Persist the curated mass (category default refined by size class and
+    # typical load) so the client and 3D simulation read one source of truth.
     from app.ml.vehicle_profiles import resolve_mass_kg
 
     profile.mass_kg = resolve_mass_kg(
         payload.category,
         size_class=payload.size_class,
+        load_level=payload.load_level,
         mass_kg=payload.mass_kg,
     )
 

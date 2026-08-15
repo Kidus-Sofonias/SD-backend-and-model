@@ -61,19 +61,34 @@ SIZE_CLASS_MULTIPLIERS: dict[str, float] = {
     "large": 1.2,
 }
 
+# Typical load adjusts effective mass: a fully loaded bus or truck stops
+# noticeably later than an empty one (braking distance scales with mass).
+LOAD_LEVEL_MULTIPLIERS: dict[str, float] = {
+    "light": 0.95,
+    "normal": 1.0,
+    "heavy": 1.15,
+}
+
 
 def _clamp(value: float, low: float, high: float) -> float:
     return float(max(low, min(high, value)))
 
 
-def resolve_mass_kg(category: str, *, size_class: str | None = None, mass_kg: float | None = None) -> float:
+def resolve_mass_kg(
+    category: str,
+    *,
+    size_class: str | None = None,
+    load_level: str | None = None,
+    mass_kg: float | None = None,
+) -> float:
     """Curated vehicle mass in kg: explicit override > category default
-    refined by size class."""
+    refined by size class and typical load."""
     if mass_kg is not None and mass_kg > 0:
         return float(mass_kg)
     params = VEHICLE_CATEGORIES.get(category, VEHICLE_CATEGORIES["other"])
     multiplier = SIZE_CLASS_MULTIPLIERS.get(size_class or "", 1.0)
-    return float(params.mass_kg * multiplier)
+    load_multiplier = LOAD_LEVEL_MULTIPLIERS.get(load_level or "", 1.0)
+    return float(params.mass_kg * multiplier * load_multiplier)
 
 
 def longitudinal_scale(mass_kg: float) -> float:

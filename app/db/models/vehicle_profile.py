@@ -39,7 +39,16 @@ class VehicleProfile(Base):
     size_class: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # fwd | rwd | awd | 4wd (optional; informs acceleration expectations).
     drive_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
-    # Curated mass in kg (category default, refined by size_class or explicit).
+    # auto | manual (optional; engine braking changes braking-signature reading).
+    transmission: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # Where the phone lives while driving: mount_dashboard | cupholder | pocket | lap.
+    # Calibrates phone-handling detection and vertical-noise tolerance.
+    phone_placement: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    # Typical load: light | normal | heavy (optional; refines effective mass).
+    load_level: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # Typical road context: city | highway | mixed (optional; speed expectations).
+    road_context: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # Curated mass in kg (category default, refined by size_class/load or explicit).
     mass_kg: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
