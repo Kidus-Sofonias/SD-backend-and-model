@@ -109,6 +109,11 @@ def ensure_sensor_sample_columns() -> None:
     with engine.begin() as connection:
         if "altitude_m" not in columns:
             connection.execute(text("ALTER TABLE sensor_samples ADD COLUMN altitude_m FLOAT"))
+        # Phase 9: phone-handling windows (driver picked up/adjusted the phone)
+        # must be distinguishable from driving so they never generate phantom
+        # events. Column added non-destructively for existing installs.
+        if "phone_handling" not in columns:
+            connection.execute(text("ALTER TABLE sensor_samples ADD COLUMN phone_handling BOOLEAN"))
 
 
 def _resync_table_id_sequence(table_name: str) -> None:

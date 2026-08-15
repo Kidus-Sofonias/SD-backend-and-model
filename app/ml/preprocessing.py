@@ -75,6 +75,18 @@ def preprocess_samples(
     if missing:
         raise ValueError(f"Missing required fields: {missing}")
 
+    # Phone-handling windows are NOT vehicle motion: the driver picked up or
+    # adjusted the phone, so its IMU readings describe the hand, not the car.
+    # Dropping them here protects BOTH the live detector and the offline
+    # scoring pipeline from phantom braking/turn/bump events. The timestamp
+    # gap they create is handled by the existing max_gap_s logic.
+    if "phone_handling" in df.columns:
+        handled = df["phone_handling"].fillna(False).astype(bool)
+        if handled.any():
+            df = df[~handled].copy()
+            if df.empty:
+                return df
+
     # --- Numeric sanitization (CRIT-2: null GPS speed crashed finalization) ---
     # Coerce IMU columns to float, treating missing values as 0 (phones legitimately
     # lack some sensors; a missing IMU reading is "no motion signal", not an error).

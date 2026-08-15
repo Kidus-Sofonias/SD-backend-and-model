@@ -195,6 +195,14 @@ class LiveMonitorService:
             profile = self.db.get(VehicleProfile, profile_id)
             vehicle_category = profile.category if profile else None
 
+        # While the phone is being handled (picked up/adjusted), its IMU
+        # readings are the hand's motion, not the vehicle's — surface no
+        # accel so the 3D view settles instead of reacting to phantom input.
+        phone_handling = bool(latest is not None and latest.phone_handling)
+        longitudinal = None if phone_handling else _longitudinal_accel(prev, latest)
+        lateral = None if phone_handling else _lateral_accel(latest)
+        vertical = None if phone_handling else _vertical_accel(latest)
+
         return {
             "trip_id": trip.id,
             "status": trip.status,
@@ -202,16 +210,17 @@ class LiveMonitorService:
             "elapsed_s": round(elapsed_s, 1),
             "samples_uploaded": sample_count,
             "vehicle_category": vehicle_category,
+            "phone_handling": phone_handling,
             "latest": {
                 "ts": latest.ts.isoformat() if latest and latest.ts is not None else None,
                 "speed_mps": latest.speed_mps if latest else None,
                 "lat": latest.lat if latest else None,
                 "lon": latest.lon if latest else None,
                 "accuracy_m": latest.accuracy_m if latest else None,
-                "accel_mag_mps2": _accel_magnitude(latest),
-                "longitudinal_accel_mps2": _longitudinal_accel(prev, latest),
-                "lateral_accel_mps2": _lateral_accel(latest),
-                "vertical_accel_mps2": _vertical_accel(latest),
+                "accel_mag_mps2": None if phone_handling else _accel_magnitude(latest),
+                "longitudinal_accel_mps2": longitudinal,
+                "lateral_accel_mps2": lateral,
+                "vertical_accel_mps2": vertical,
             },
             "live_score": _provisional_live_score(counts, elapsed_s, cfg),
             "event_counts": counts,
