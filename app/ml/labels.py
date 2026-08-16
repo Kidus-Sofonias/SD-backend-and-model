@@ -16,13 +16,20 @@ from __future__ import annotations
 
 def review_label_tier(reviewed_label_source: str | None) -> str:
     """Classify a review label source into ``reviewed_real``,
-    ``reviewed_synthetic`` or ``reviewed_demo``.
+    ``reviewed_external``, ``reviewed_synthetic`` or ``reviewed_demo``.
 
     Case-insensitive (``source.lower()``) so behavior is identical on SQLite
     and PostgreSQL. A missing source is treated as ``reviewed_real`` (the
     admin review default).
+
+    ``reviewed_external`` covers labels imported from external benchmark
+    datasets (e.g. the Kaggle driving-behavior dataset) — strong ground truth
+    for training, but NOT human admin reviews, so the review-gated retrain
+    counter must not count them.
     """
     source = (reviewed_label_source or "reviewed_real").strip().lower()
+    if "external" in source or "kaggle" in source:
+        return "reviewed_external"
     if "synthetic" in source:
         return "reviewed_synthetic"
     if "demo" in source:

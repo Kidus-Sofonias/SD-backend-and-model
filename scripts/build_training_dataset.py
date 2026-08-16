@@ -141,6 +141,9 @@ def _class_counts(rows: list[dict]) -> dict[int, int]:
 def select_rows_for_training(rows: list[dict]) -> tuple[list[dict], dict[str, dict[int, int] | int]]:
     priority_order = [
         "reviewed_real",
+        # External benchmark labels (e.g. Kaggle driving-behavior dataset):
+        # strong ground truth, below human admin reviews but above everything else.
+        "reviewed_external",
         "reviewed_synthetic",
         "synthetic_ground_truth",  # Ground-truth from generator — stronger than weak rules
         # Demo reviews are score-derived showcase labels from the seed script;

@@ -160,6 +160,17 @@ def test_choose_label_synthetic_review_is_synthetic_tier() -> None:
     assert (label, source, tier) == (1, "reviewed_synthetic", "reviewed_synthetic")
 
 
+def test_choose_label_kaggle_external_is_external_tier() -> None:
+    label, source, tier = choose_label(
+        _trip(reviewed_label=1, source="kaggle_external"),
+        rule_score=90,
+        reviewed_labels={},
+        synthetic_labels={},
+        strong_labels={},
+    )
+    assert (label, source, tier) == (1, "kaggle_external", "reviewed_external")
+
+
 def test_choose_label_falls_back_to_ground_truth_without_review() -> None:
     label, source, tier = choose_label(
         _trip(),
@@ -197,6 +208,10 @@ def test_count_reviewed_real_excludes_demo_and_synthetic(tmp_path: Path) -> None
     add_trip("b", 0, "human_review")
     add_trip("c", 1, "demo_review")
     add_trip("d", 0, "reviewed_synthetic")
+    # Benchmark dataset labels are strong training data but NOT human reviews —
+    # they must not count toward the review-gated retrain watermark.
+    add_trip("f", 1, "kaggle_external")
+    add_trip("g", 0, "kaggle_external")
     add_trip("e", None, None)
     db.commit()
 
