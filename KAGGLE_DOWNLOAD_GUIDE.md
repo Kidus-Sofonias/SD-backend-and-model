@@ -1,68 +1,65 @@
-# How to Download & Ingest the Kaggle Driving Dataset
+# Kaggle Driving Dataset — Download & Ingest Guide
 
-## Step 1: Download
+The dataset was **already downloaded and ingested** (Aug 16, 2026). This guide
+documents what happened and how to re-run it.
 
-1. Go to **https://www.kaggle.com/datasets/shakilofficial0/large-scale-driver-behavior-sensor-dataset**
-2. Click **Download** (free account required)
-3. You'll get a ZIP — unzip it to get a CSV file (likely `driver_behavior.csv` or similar)
+## The dataset
 
-## Step 2: Place the file
+**Kaggle — Large-Scale Driver Behavior Sensor Dataset**
+https://www.kaggle.com/datasets/shakilofficial0/large-scale-driver-behavior-sensor-dataset
 
-Put the CSV anywhere accessible, e.g.:
-```
-backend/driver_behavior.csv
-```
+- **File:** `artifacts/datasets/dataset_7M.csv` (947 MB, 7,000,000 rows)
+- **Columns:** `AccX, AccY, AccZ, GyroX, GyroY, GyroZ, Class (SLOW|NORMAL|AGGRESSIVE), Timestamp`
+- **License:** free Kaggle download (account required)
 
-## Step 3: Dry run (optional — verify it works)
+### Actual structure (decoded during ingestion)
 
-```bash
-cd backend
-python -m scripts.ingest_kaggle_driving --csv driver_behavior.csv --dry-run
-```
+- **Two interleaved recordings** — 3,500,000 unique timestamps, each appearing
+  exactly twice (stream A = first occurrence, stream B = second).
+- Each stream spans ~58 minutes of driving (timestamps are a synthetic ms
+  index, labels assigned by timestamp range).
+- **No GPS speed** — the ingestion synthesizes speed from the calibrated
+  accelerometer.
+- **Magnitudes are not physical units** — calibrated with a fixed global scale
+  before the pipeline sees them.
 
-This will segment the data into trips and show you what would be inserted without touching the DB.
+## Already done (committed)
 
-## Step 4: Ingest
+1. CSV moved from repo root → `artifacts/datasets/dataset_7M.csv`
+2. `scripts/ingest_kaggle_driving.py` rewritten for the real structure:
+   split streams → calibrate → synthesize speed → 10 Hz downsample → segment
+   into 45 s trips → **156 trips** inserted → feature pipeline run
+3. New `reviewed_external` label tier (`app/ml/labels.py`) so benchmark labels
+   never count as human reviews
+4. `build_training_dataset` → **185 labeled rows** (was 14)
+5. `train_model_v2` → promoted `lr_20260816T031505Z` (risky-F1 **0.952**,
+   Brier 0.021) — see `docs/HACKATHON_PHASE8D_KAGGLE_RETRAIN.md`
 
-```bash
-cd backend
-python -m scripts.ingest_kaggle_driving --csv driver_behavior.csv --max-trips 500
-```
-
-This will:
-- Read the CSV (7M rows)
-- Segment into 500 trips (5-15 minutes each)
-- Map labels: AGGRESSIVE → risky (1), NORMAL/SLOW → safe (0)
-- Insert trips + sensor samples into the DB
-- Run the feature pipeline on each trip
-- Save labels to `artifacts/datasets/reviewed_trip_labels.json`
-
-## Step 5: Rebuild training dataset
+## Re-running from scratch
 
 ```bash
 cd backend
-python -m scripts.build_training_dataset
-```
 
-## Step 6: Retrain
+# Fresh local DB with current schema + demo seed
+python -m scripts.reset_and_seed --local-db kaggle_train.db --drivers 5 --trips-per-driver 6
 
-```bash
-cd backend
+# Dry run (just segment + calibrate, no DB writes)
+python -m scripts.ingest_kaggle_driving --csv ../artifacts/datasets/dataset_7M.csv --trip-seconds 45 --dry-run
+
+# Ingest into the fresh DB
+python -m scripts.ingest_kaggle_driving --csv ../artifacts/datasets/dataset_7M.csv --trip-seconds 45 --db "sqlite:///./kaggle_train.db"
+
+# Rebuild dataset + retrain + benchmark (point at the same DB)
+DATABASE_URL="sqlite:///./kaggle_train.db" python -m scripts.build_training_dataset
 python -m scripts.train_model_v2
 python -m scripts.benchmark_models
 ```
 
-## What the dataset contains
+### Why 156 trips and not 500
 
-| Column | Description |
-|---|---|
-| AccX, AccY, AccZ | Accelerometer (m/s²) |
-| GyroX, GyroY, GyroZ | Gyroscope (rad/s) |
-| Class | SLOW, NORMAL, or AGGRESSIVE |
-| Timestamp | Seconds since session start |
-
-## Label mapping
-
-- **AGGRESSIVE** → risky (1) — harsh braking, sudden turns, speeding
-- **NORMAL** → safe (0) — smooth driving
-- **SLOW** → safe (0) — cautious driving (still safe, just slower)
+The file contains only ~116 minutes of unique driving (2 × 58 min). 156 trips
+at 45 s is the honest ceiling from this dataset — 500 trips would require
+7-second slices, which would be noise. The path to 500+ is the **admin review
+loop**: every admin review of a completed trip feeds the training set as a
+safe/risky human label, and the auto-retrain loop retrains at
+`AUTO_RETRAIN_MIN_REVIEWED = 30` real reviews.
