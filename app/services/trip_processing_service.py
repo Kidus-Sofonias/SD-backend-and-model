@@ -514,7 +514,7 @@ class TripProcessingService:
     def get_trip_detail(self, actor: UserRecord, trip_id: str) -> dict:
         trip = self._load_trip_for_actor(actor=actor, trip_id=trip_id)
         breakdown = self._load_breakdown(trip)
-        return {
+        response = {
             "id": trip.id,
             "user_id": trip.user_id,
             "started_at": trip.started_at,
@@ -522,6 +522,18 @@ class TripProcessingService:
             "status": trip.status,
             **self._build_response(trip, breakdown, already_processed=False),
         }
+        # Phase 9: expose the vehicle class that drove this trip so the 3D
+        # replay renders the correct model. Prefer the class recorded at
+        # finalize; fall back to the driver's current profile for older trips
+        # that predate vehicle-aware finalization.
+        vehicle_category = breakdown.get("vehicle_category")
+        if not vehicle_category:
+            profile = self.db.execute(
+                select(VehicleProfile).where(VehicleProfile.user_id == trip.user_id)
+            ).scalar_one_or_none()
+            vehicle_category = profile.category if profile else None
+        response["vehicle_category"] = vehicle_category
+        return response
 
     def list_review_dashboard(self, actor: UserRecord, limit: int = 50) -> list[dict]:
         self._require_admin(actor)

@@ -2,6 +2,8 @@
 
 FastAPI backend and ML pipeline for ingesting trip sensor samples, finalizing trips, generating driving events, and scoring risky driving behavior.
 
+> **Documentation:** full project docs live in `../docs/` (architecture, API reference, database, ML pipeline, event detection, scoring, realtime, deployment, and an AI-agent guide). See `../docs/README.md` for the index.
+
 ## What is included
 
 - Auth endpoints for register, login, and current-user lookup

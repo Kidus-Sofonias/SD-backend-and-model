@@ -50,6 +50,10 @@ class TripDetailOut(TripOut):
     breakdown: dict[str, Any] = Field(default_factory=dict)
     trip_features: dict[str, Any] = Field(default_factory=dict)
     events_generated: int | None = None
+    # Phase 3/9: vehicle class that drove this trip (from the trip's recorded
+    # breakdown, falling back to the driver's current profile). Lets the 3D
+    # replay and live views render the correct vehicle model.
+    vehicle_category: str | None = None
 
 
 class TripSummaryOut(BaseModel):
