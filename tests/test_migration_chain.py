@@ -28,7 +28,7 @@ from pathlib import Path
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 
-HEAD_REVISION = "20260813_add_vehicle_profile"
+HEAD_REVISION = "20260821_add_partner_api"
 
 
 def _run_alembic(db_path: Path, *args: str) -> subprocess.CompletedProcess:
@@ -54,7 +54,15 @@ def test_alembic_upgrade_head_on_fresh_sqlite(tmp_path: Path) -> None:
     conn = sqlite3.connect(db_path)
     try:
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        assert {"users", "trips", "driving_events", "sensor_samples", "vehicle_profiles"} <= tables, tables
+        assert {
+            "users",
+            "trips",
+            "driving_events",
+            "sensor_samples",
+            "vehicle_profiles",
+            "organizations",
+            "partner_api_keys",
+        } <= tables, tables
 
         event_columns = {r[1] for r in conn.execute("PRAGMA table_info(driving_events)")}
         assert {"confidence", "severity", "duration_s", "occurred_at", "lat", "lon"} <= event_columns, event_columns
@@ -71,7 +79,7 @@ def test_alembic_upgrade_head_on_fresh_sqlite(tmp_path: Path) -> None:
         conn.close()
 
 
-def test_alembic_downgrade_removes_vehicle_migration(tmp_path: Path) -> None:
+def test_alembic_downgrade_removes_partner_migration(tmp_path: Path) -> None:
     db_path = tmp_path / "migrate-dn.db"
 
     assert _run_alembic(db_path, "upgrade", "head").returncode == 0
@@ -80,14 +88,16 @@ def test_alembic_downgrade_removes_vehicle_migration(tmp_path: Path) -> None:
     conn = sqlite3.connect(db_path)
     try:
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        assert "vehicle_profiles" not in tables, tables
+        assert "partner_api_keys" not in tables, tables
+        assert "organizations" not in tables, tables
+        assert "vehicle_profiles" in tables, tables
         trip_columns = {r[1] for r in conn.execute("PRAGMA table_info(trips)")}
-        assert "vehicle_profile_id" not in trip_columns, trip_columns
+        assert "vehicle_profile_id" in trip_columns, trip_columns
         # Phase 10 event columns must SURVIVE this downgrade (they belong to
         # the previous revision).
         event_columns = {r[1] for r in conn.execute("PRAGMA table_info(driving_events)")}
         assert {"confidence", "severity", "duration_s"} <= event_columns, event_columns
         version = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
-        assert version == "20260813_add_event_confidence_severity", version
+        assert version == "20260813_add_vehicle_profile", version
     finally:
         conn.close()

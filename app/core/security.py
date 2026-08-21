@@ -1,6 +1,9 @@
 # File role: Shared core utilities for configuration, security, JWT handling, logging, and typed application errors.
 # Connects to: app.core.errors.
 # Key symbols/vars: _pwd_context, BCRYPT_MAX_BYTES, _bytes_len, hash_password.
+import hashlib
+import secrets
+
 from passlib.context import CryptContext
 from app.core.errors import AppError
 
@@ -29,3 +32,11 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     if _bytes_len(plain_password) > BCRYPT_MAX_BYTES:
         return False
     return _pwd_context.verify(plain_password, hashed_password)
+
+
+def generate_api_key() -> str:
+    return "sd_live_" + secrets.token_urlsafe(32)
+
+
+def hash_api_key(api_key: str) -> str:
+    return hashlib.sha256(api_key.encode("utf-8")).hexdigest()

@@ -49,6 +49,9 @@ LOGIN_RATE_LIMITER = SlidingWindowRateLimiter(max_requests=10, window_seconds=60
 # roughly every 4 seconds (~15/min), so this leaves generous headroom while
 # stopping runaway loops or abuse.
 UPLOAD_RATE_LIMITER = SlidingWindowRateLimiter(max_requests=120, window_seconds=60.0)
+# Partner integrations are server-to-server, but a bad adapter must not be
+# able to overwhelm the shared database. The key is the authenticated API key.
+PARTNER_RATE_LIMITER = SlidingWindowRateLimiter(max_requests=300, window_seconds=60.0)
 
 
 def client_ip_for(request: Request) -> str:

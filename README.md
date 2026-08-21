@@ -69,9 +69,81 @@ Recommended Render service settings:
 ```text
 Root Directory: (leave empty if this repo is already the backend repo)
 Build Command: pip install -r requirements.txt
-Start Command: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+Start Command:
+
 Health Check Path: /api/v1/health
 ```
+
+## Partner API and company integration
+
+Companies do not need to move their driver login system or give this service
+their driver passwords. An admin creates an organization and API key through
+`POST /api/v1/admin/partner-keys` while authenticated as the platform admin.
+The plaintext key is returned once; store it in the company's server-side
+secret manager and send it as `X-API-Key`.
+
+The partner endpoints are read-only and organization-scoped:
+
+```text
+GET /api/v1/partner/drivers?limit=100&offset=0
+GET /api/v1/partner/drivers/{driver_id}/trips?limit=100&offset=0
+GET /api/v1/partner/drivers/{driver_id}/stats
+POST /api/v1/partner/ingest/trips
+```
+
+Platform admins can browse every connected company through the network
+directory endpoint. It supports server-side filtering and bounded pagination:
+
+```text
+GET /api/v1/admin/organizations?search=freight&active=true&sort=drivers&limit=100&offset=0
+```
+
+`sort` accepts `name`, `drivers`, `trips`, or `created`. `active` can be
+`true` or `false`. The response contains company metadata and aggregate
+driver/trip/key counts, never API secrets.
+
+The integration should provision or synchronize a local driver record with
+`organization_id` and the company's stable `external_driver_id`. The external
+ID is the value partners should use; it prevents the company from depending
+on our database IDs. Passwords and raw sensor samples are not exposed by the
+partner API. Trip responses contain scored results and model/feature versions,
+so our internal ML or database implementation can change without requiring
+partner changes.
+
+For large fleets, use bounded pagination and request only completed trips.
+Companies can send compact scored trip summaries in batches of up to 500:
+
+```json
+{
+	"trips": [
+		{
+			"source_trip_id": "their-trip-123",
+			"external_driver_id": "their-driver-42",
+			"started_at": "2026-08-22T10:00:00Z",
+			"ended_at": "2026-08-22T10:30:00Z",
+			"status": "completed",
+			"score": 88,
+			"risk_probability": 0.08,
+			"risk_level": "low",
+			"confidence": 0.91,
+			"feature_version": "fv1",
+			"model_version": "lr_v1",
+			"processed_at": "2026-08-22T10:31:00Z"
+		}
+	]
+}
+```
+
+`source_trip_id` is the idempotency key per company driver. Replaying a batch
+updates the existing summary instead of creating another trip. This keeps our
+storage small and avoids importing the company's user database or raw sensor
+telemetry. The company's adapter can call this endpoint after its own trip
+processing finishes, so its current login and trip flow remains unchanged.
+Keys can be revoked with `DELETE /api/v1/admin/partner-keys/{api_key_id}`.
+
+Before production rollout, add per-key rate limits, audit logs, key rotation,
+TLS-only deployment, and a background retention policy for trip detail/raw
+telemetry. Do not put API keys in browser or mobile-app code.
 
 ## Tests
 
