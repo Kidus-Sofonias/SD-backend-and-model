@@ -4,6 +4,15 @@ FastAPI backend and ML pipeline for ingesting trip sensor samples, finalizing tr
 
 > **Documentation:** full project docs live in `../docs/` (architecture, API reference, database, ML pipeline, event detection, scoring, realtime, deployment, and an AI-agent guide). See `../docs/README.md` for the index.
 
+## Documentation map
+
+- [Project documentation](../docs/README.md) — complete system index
+- [Backend architecture](../docs/BACKEND.md) — app structure and request flow
+- [API reference](../docs/API_REFERENCE.md) — endpoint contracts
+- [Database](../docs/DATABASE.md) — tables, migrations, and storage
+- [ML pipeline](../docs/ML_PIPELINE.md) — training, evaluation, and promotion
+- [Deployment](../docs/DEPLOYMENT.md) — Render, Supabase, and environment variables
+
 ## What is included
 
 - Auth endpoints for register, login, and current-user lookup
@@ -69,7 +78,7 @@ Recommended Render service settings:
 ```text
 Root Directory: (leave empty if this repo is already the backend repo)
 Build Command: pip install -r requirements.txt
-Start Command:
+Start Command: uvicorn app.main:app --host 0.0.0.0 --port $PORT
 
 Health Check Path: /api/v1/health
 ```
@@ -115,22 +124,22 @@ Companies can send compact scored trip summaries in batches of up to 500:
 
 ```json
 {
-	"trips": [
-		{
-			"source_trip_id": "their-trip-123",
-			"external_driver_id": "their-driver-42",
-			"started_at": "2026-08-22T10:00:00Z",
-			"ended_at": "2026-08-22T10:30:00Z",
-			"status": "completed",
-			"score": 88,
-			"risk_probability": 0.08,
-			"risk_level": "low",
-			"confidence": 0.91,
-			"feature_version": "fv1",
-			"model_version": "lr_v1",
-			"processed_at": "2026-08-22T10:31:00Z"
-		}
-	]
+  "trips": [
+    {
+      "source_trip_id": "their-trip-123",
+      "external_driver_id": "their-driver-42",
+      "started_at": "2026-08-22T10:00:00Z",
+      "ended_at": "2026-08-22T10:30:00Z",
+      "status": "completed",
+      "score": 88,
+      "risk_probability": 0.08,
+      "risk_level": "low",
+      "confidence": 0.91,
+      "feature_version": "fv1",
+      "model_version": "lr_v1",
+      "processed_at": "2026-08-22T10:31:00Z"
+    }
+  ]
 }
 ```
 
