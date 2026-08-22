@@ -56,6 +56,37 @@ def upgrade() -> None:
     op.create_index(op.f('ix_driving_events_id'), 'driving_events', ['id'], unique=False)
     op.create_index(op.f('ix_driving_events_trip_id'), 'driving_events', ['trip_id'], unique=False)
     op.create_index(op.f('ix_driving_events_user_id'), 'driving_events', ['user_id'], unique=False)
+    # Phase 10 (hackathon): sensor_samples was previously created ONLY by
+    # init_db's create_all, so a fresh `alembic upgrade head` never had the
+    # table and later migrations (20260723) broke on SQLite. Create it here to
+    # match the model; altitude_m arrives in 20260723_add_sensor_sample_altitude.
+    op.create_table('sensor_samples',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('user_id', sa.String(), nullable=False),
+    sa.Column('trip_id', sa.String(), nullable=False),
+    sa.Column('ts', sa.DateTime(), nullable=False),
+    sa.Column('speed_mps', sa.Float(), nullable=True),
+    sa.Column('lat', sa.Float(), nullable=True),
+    sa.Column('lon', sa.Float(), nullable=True),
+    sa.Column('accuracy_m', sa.Float(), nullable=True),
+    sa.Column('ax', sa.Float(), nullable=True),
+    sa.Column('ay', sa.Float(), nullable=True),
+    sa.Column('az', sa.Float(), nullable=True),
+    sa.Column('gx', sa.Float(), nullable=True),
+    sa.Column('gy', sa.Float(), nullable=True),
+    sa.Column('gz', sa.Float(), nullable=True),
+    sa.ForeignKeyConstraint(['trip_id'], ['trips.id'], ),
+    sa.ForeignKeyConstraint(['user_id'], ['users.id'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
+    # Match the model's index=True columns (id, user_id, trip_id, ts) plus the
+    # composite indexes from __table_args__.
+    op.create_index(op.f('ix_sensor_samples_id'), 'sensor_samples', ['id'], unique=False)
+    op.create_index(op.f('ix_sensor_samples_user_id'), 'sensor_samples', ['user_id'], unique=False)
+    op.create_index(op.f('ix_sensor_samples_trip_id'), 'sensor_samples', ['trip_id'], unique=False)
+    op.create_index(op.f('ix_sensor_samples_ts'), 'sensor_samples', ['ts'], unique=False)
+    op.create_index(op.f('ix_sensor_samples_trip_ts'), 'sensor_samples', ['trip_id', 'ts'], unique=False)
+    op.create_index(op.f('ix_sensor_samples_user_trip'), 'sensor_samples', ['user_id', 'trip_id'], unique=False)
     # ### end Alembic commands ###
 
 
@@ -71,4 +102,11 @@ def downgrade() -> None:
     op.drop_table('trips')
     op.drop_index(op.f('ix_users_email'), table_name='users')
     op.drop_table('users')
+    op.drop_index(op.f('ix_sensor_samples_user_trip'), table_name='sensor_samples')
+    op.drop_index(op.f('ix_sensor_samples_trip_ts'), table_name='sensor_samples')
+    op.drop_index(op.f('ix_sensor_samples_ts'), table_name='sensor_samples')
+    op.drop_index(op.f('ix_sensor_samples_trip_id'), table_name='sensor_samples')
+    op.drop_index(op.f('ix_sensor_samples_user_id'), table_name='sensor_samples')
+    op.drop_index(op.f('ix_sensor_samples_id'), table_name='sensor_samples')
+    op.drop_table('sensor_samples')
     # ### end Alembic commands ###

@@ -30,6 +30,9 @@ def _default_state() -> dict[str, Any]:
     return {
         "status": "idle",
         "last_requested_milestone": 0,
+        # Hackathon: review-gated retrains keep their own watermark so a
+        # completed-trip retrain can never starve the review trigger.
+        "last_review_requested_milestone": 0,
         "last_succeeded_milestone": 0,
         "pending_milestone": 0,
     }
@@ -59,6 +62,31 @@ def milestone_for_completed_trips(*, completed_trip_count: int, trip_interval: i
     if completed_trip_count % trip_interval != 0:
         return None
     return completed_trip_count
+
+
+def review_milestone_for_count(
+    *,
+    reviewed_trip_count: int | None,
+    min_reviewed: int,
+    trip_interval: int,
+) -> int | None:
+    """Milestone for retraining on REAL human-reviewed trips (hackathon).
+
+    Fires once per review bucket: the first time the human-reviewed count
+    reaches `min_reviewed`, and then once per `trip_interval` reviewed trips
+    after that (e.g. with min_reviewed=30, interval=100: buckets at 30, 130,
+    230, ...). Bucketing makes the trigger batch-safe - an admin who reviews
+    15 trips in one sitting cannot skip a milestone. The caller's
+    last-requested guard ensures at most one retrain per bucket.
+
+    A value of 0 for min_reviewed disables the review trigger entirely.
+    """
+    if min_reviewed <= 0 or trip_interval <= 0 or not reviewed_trip_count:
+        return None
+    if reviewed_trip_count < min_reviewed:
+        return None
+    bucket = (reviewed_trip_count - min_reviewed) // trip_interval
+    return min_reviewed + bucket * trip_interval
 
 
 def should_request_auto_retrain(
@@ -139,37 +167,69 @@ def _run_refresh_cycle(milestone: int) -> None:
         _queue_pending_run_if_needed()
 
 
-def maybe_schedule_auto_retrain(*, completed_trip_count: int) -> bool:
+def maybe_schedule_auto_retrain(
+    *,
+    completed_trip_count: int,
+    reviewed_trip_count: int | None = None,
+) -> bool:
+    """Schedule the refresh cycle on either trigger (hackathon).
+
+    - Completed-trip trigger: every ``AUTO_RETRAIN_TRIP_INTERVAL`` completed
+      trips (unchanged behavior).
+    - Review trigger: once per review bucket once ``AUTO_RETRAIN_MIN_REVIEWED``
+      REAL human-reviewed trips exist (30, 130, 230, ...).
+
+    Both triggers drive the same worker but keep INDEPENDENT watermarks, so a
+    completed-trip retrain can never suppress the review-gated retrain and
+    vice-versa. The shared ``last_requested_milestone`` only ever grows.
+    """
     if not settings.auto_retrain_enabled:
         return False
 
     trip_interval = int(settings.auto_retrain_trip_interval)
-    milestone = milestone_for_completed_trips(
+    completed_milestone = milestone_for_completed_trips(
         completed_trip_count=completed_trip_count,
         trip_interval=trip_interval,
     )
-    if milestone is None:
-        return False
+    review_milestone = review_milestone_for_count(
+        reviewed_trip_count=reviewed_trip_count,
+        min_reviewed=int(settings.auto_retrain_min_reviewed),
+        trip_interval=trip_interval,
+    )
 
     with _state_lock:
         state = _load_state()
-        last_requested_milestone = int(state.get("last_requested_milestone") or 0)
-        if not should_request_auto_retrain(
-            completed_trip_count=completed_trip_count,
-            trip_interval=trip_interval,
-            last_requested_milestone=last_requested_milestone,
-        ):
+        last_requested = int(state.get("last_requested_milestone") or 0)
+        last_review_requested = int(state.get("last_review_requested_milestone") or 0)
+
+        completed_new = completed_milestone is not None and completed_milestone > last_requested
+        review_new = review_milestone is not None and review_milestone > last_review_requested
+        if not completed_new and not review_new:
             return False
+
+        # Highest new milestone drives the shared worker; both watermarks are
+        # advanced independently so neither trigger can be starved or repeat.
+        milestone = max(
+            completed_milestone if completed_new else 0,
+            review_milestone if review_new else 0,
+        )
 
         global _active_thread
         if _active_thread is not None and _active_thread.is_alive():
+            # A cycle is running: remember the milestone and advance the review
+            # watermark now (batch-safe); the queued run starts when the
+            # current cycle finishes (see _queue_pending_run_if_needed).
             state["pending_milestone"] = max(int(state.get("pending_milestone") or 0), milestone)
+            if review_new:
+                state["last_review_requested_milestone"] = max(last_review_requested, review_milestone)
             state["last_seen_completed_trip_count"] = completed_trip_count
             _save_state(state)
             return False
 
         state["status"] = "queued"
-        state["last_requested_milestone"] = milestone
+        state["last_requested_milestone"] = max(last_requested, milestone)
+        if review_new:
+            state["last_review_requested_milestone"] = max(last_review_requested, review_milestone)
         state["last_seen_completed_trip_count"] = completed_trip_count
         state["active_milestone"] = milestone
         state["queued_at"] = _utc_now_iso()

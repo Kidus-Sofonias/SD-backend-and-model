@@ -2,7 +2,7 @@
 # Converts aggregated trip features into an interpretable 0..100 safety score.
 # Connects to: app.ml.pipeline and later backend fallback scoring.
 # Key symbols/vars:
-# - score_trip_rules_v2
+# - score_trip_rules_v3
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ def _normalize(value: float, low: float, high: float) -> float:
     return float(np.clip((value - low) / (high - low), 0.0, 1.0))
 
 
-def score_trip_rules_v2(
+def score_trip_rules_v3(
     trip_features: dict,
     w_emergency_brake: float,
     w_brake: float,
@@ -33,34 +33,56 @@ def score_trip_rules_v2(
     speed_var_normalize_high: float,
     density_normalize_low: float,
     density_normalize_high: float,
+    density_distance_normalize_high: float = 4.0,
+    density_min_duration_s: float = 120.0,
 ) -> dict:
-    """Produce a trip safety score in the range 0..100 (Phase 3 / v2).
+    """Produce a trip safety score in the range 0..100 (Phase 10 / v3).
 
     Model:
-        score = 100 - sum(per-event penalties) - smoothness penalties
-                - event-density penalty
+        score = 100 - sum(per-event impacts) - smoothness penalties
+                - exposure penalty
 
-    Design notes (Phase 3):
-    - Emergency braking is CHARGEABLE (w_emergency_brake): it is a risk
-      indicator (following distance, approach speed), not an excuse. The old
-      scorer exempted it, so trips full of emergency stops scored ~80.
-    - Penalties are fixed per event type, and a density term
-      (w_density * normalize(events_per_hour)) keeps scores consistent across
-      short and long trips: one hard brake in 10 minutes costs more than one in
-      two hours.
+    Phase 10 (hackathon) changes vs v2:
+    - Per-event penalty = weight x IMPACT, where impact = severity x
+      confidence-factor (from ``trip_features['event_impacts']``). A noisy
+      3.3 m/s^2 spike with low confidence costs far less than a sustained
+      6.4 m/s^2 emergency brake. Falls back to count x weight for legacy
+      feature dicts without impacts.
+    - Exposure is normalised by DISTANCE driven (events per km) when GPS moved,
+      with a time-based fallback that uses a reduced duration floor so short
+      trips are not catastrophically penalised by per-hour rates.
+    - Emergency braking remains CHARGEABLE (a following-distance / approach
+      speed risk indicator).
     - Smoothness penalties (jerk percentile, speed variance) stay bounded via
-      normalization, so noisy phone data can only contribute a limited share.
+      normalization.
     """
     confidence = float(trip_features.get("confidence", 0.0))
+    impacts = trip_features.get("event_impacts") or {}
+
+    def _cat_penalty(category: str, weight: float, count_key: str) -> float:
+        impact = float(impacts.get(category, 0.0) or 0.0)
+        if impact > 0:
+            return weight * impact
+        # Legacy fallback: feature dicts without impacts use count x weight.
+        return weight * int(trip_features.get(count_key, 0))
+
+    distance_km = float(trip_features.get("distance_km", 0.0) or 0.0)
+    events_per_km = float(trip_features.get("events_per_km", 0.0) or 0.0)
+    if distance_km >= 0.05 and events_per_km > 0:
+        density_value = events_per_km
+        density_high = density_distance_normalize_high
+    else:
+        density_value = float(trip_features.get("events_per_hour", 0.0) or 0.0)
+        density_high = density_normalize_high
 
     penalties = {
-        "emergency_brake": w_emergency_brake * int(trip_features.get("emergency_brake_count", 0)),
-        "harsh_brake": w_brake * int(trip_features.get("chargeable_hard_brake_count", 0)),
-        "harsh_accel": w_accel * int(trip_features.get("harsh_accel_count", 0)),
-        "aggressive_turn": w_turn * int(trip_features.get("aggressive_turn_count", 0)),
-        "overspeed": w_overspeed * int(trip_features.get("overspeed_count", 0)),
-        "severe_overspeed": w_severe_overspeed * int(trip_features.get("severe_overspeed_count", 0)),
-        "unstable_motion": w_unstable_motion * int(trip_features.get("unstable_motion_count", 0)),
+        "emergency_brake": _cat_penalty("emergency_brake", w_emergency_brake, "emergency_brake_count"),
+        "harsh_brake": _cat_penalty("hard_brake", w_brake, "chargeable_hard_brake_count"),
+        "harsh_accel": _cat_penalty("hard_accel", w_accel, "harsh_accel_count"),
+        "aggressive_turn": _cat_penalty("aggressive_turn", w_turn, "aggressive_turn_count"),
+        "overspeed": _cat_penalty("overspeed", w_overspeed, "overspeed_count"),
+        "severe_overspeed": _cat_penalty("severe_overspeed", w_severe_overspeed, "severe_overspeed_count"),
+        "unstable_motion": _cat_penalty("unstable_motion", w_unstable_motion, "unstable_motion_count"),
         "jerk": w_jerk * _normalize(
             trip_features.get("p95_jerk", 0.0),
             jerk_normalize_low,
@@ -72,9 +94,9 @@ def score_trip_rules_v2(
             speed_var_normalize_high,
         ),
         "density": w_density * _normalize(
-            trip_features.get("events_per_hour", 0.0),
+            density_value,
             density_normalize_low,
-            density_normalize_high,
+            density_high,
         ),
     }
 
@@ -86,5 +108,5 @@ def score_trip_rules_v2(
         "penalties": penalties,
         "trip_features": trip_features,
         "confidence": confidence,
-        "scoring_version": "v2",
+        "scoring_version": "v3",
     }

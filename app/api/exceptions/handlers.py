@@ -46,12 +46,34 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException):
     return JSONResponse(status_code=exc.status_code, content=payload.model_dump())
 
 
+def _sanitize_validation_errors(errors) -> list[dict]:
+    """Make pydantic error dicts JSON-safe.
+
+    When a field_validator raises ``ValueError``, pydantic v2 embeds the raw
+    exception object in ``ctx: {"error": ValueError(...)}``, which is not
+    JSON serializable and previously crashed the 422 handler with
+    "Object of type ValueError is not JSON serializable" (any validator-driven
+    request rejection). Exceptions become their message; everything else is
+    passed through.
+    """
+    def _clean(value):
+        if isinstance(value, Exception):
+            return str(value)
+        if isinstance(value, dict):
+            return {key: _clean(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [_clean(item) for item in value]
+        return value
+
+    return [_clean(dict(error)) for error in errors]
+
+
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     request_id = _get_request_id(request)
 
     # Pydantic/FastAPI validation errors (bad request body/query params)
     payload = ErrorResponse(
-        error=ErrorDetail(message_key="error.validation", details=exc.errors()),
+        error=ErrorDetail(message_key="error.validation", details=_sanitize_validation_errors(exc.errors())),
         request_id=request_id,
     )
     return JSONResponse(status_code=422, content=payload.model_dump())

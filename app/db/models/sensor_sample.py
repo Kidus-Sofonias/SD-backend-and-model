@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Index
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -33,6 +33,12 @@ class SensorSample(Base):
     gx: Mapped[float | None] = mapped_column(Float, nullable=True)
     gy: Mapped[float | None] = mapped_column(Float, nullable=True)
     gz: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # True when the phone itself was being handled (picked up / adjusted) so
+    # its motion is NOT vehicle motion. Event detection and live telemetry
+    # treat these windows as "not driving" — they must not generate phantom
+    # braking/turn/bump events or move the 3D vehicle.
+    phone_handling: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
     trip = relationship("Trip", back_populates="samples")
 

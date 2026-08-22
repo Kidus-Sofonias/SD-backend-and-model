@@ -13,10 +13,18 @@ from app.core.security import hash_password
 from app.core.utils import as_utc_timestamp
 from app.db.models.sensor_sample import SensorSample
 from app.db.models.trip import Trip
+from app.db.models.vehicle_profile import VehicleProfile
 from app.realtime.live_detector import live_alert_detector
 from app.repositories.sensor_sample_repository import SensorSampleRepository
 from app.repositories.user_repository import DriverRecord, SqlUserRepository, UserRecord
-from app.services.live_monitor_service import _accel_magnitude, _longitudinal_accel, _provisional_live_score
+from app.services.live_monitor_service import (
+    _accel_magnitude,
+    _lateral_accel,
+    _longitudinal_accel,
+    _provisional_live_score,
+    _vertical_accel,
+    vehicle_tuned_cfg,
+)
 from app.services.route_snap_service import RouteSnapService
 
 # A trip is "live" if its latest sample is under this age; "stale" while it
@@ -65,6 +73,17 @@ class AdminService:
         ).scalars().all()
 
         sample_repo = SensorSampleRepository(self.db)
+
+        # Batch-load vehicle profiles once so each trip's provisional score is
+        # computed with its driver's vehicle-tuned config (no N+1 lookups).
+        profile_ids = [trip.vehicle_profile_id for trip in trips if trip.vehicle_profile_id]
+        profiles: dict[str, VehicleProfile] = {}
+        if profile_ids:
+            rows = self.db.execute(
+                select(VehicleProfile).where(VehicleProfile.id.in_(profile_ids))
+            ).scalars().all()
+            profiles = {p.id: p for p in rows}
+
         results: list[dict] = []
         for trip in trips:
             samples = sample_repo.list_latest_by_trip(
@@ -89,13 +108,16 @@ class AdminService:
             elapsed_s = max(0.0, (now - started_at).total_seconds()) if started_at else 0.0
 
             counts = live_alert_detector.event_counts(trip.id)
+            cfg = vehicle_tuned_cfg(self.db, trip, profiles=profiles)
             driver = self.users.get_driver_by_id(trip.user_id)
 
+            profile = profiles.get(trip.vehicle_profile_id) if trip.vehicle_profile_id else None
             results.append(
                 {
                     "trip_id": trip.id,
                     "driver_user_id": trip.user_id,
                     "driver_email": driver.email if driver else None,
+                    "vehicle_category": profile.category if profile else None,
                     "started_at": started_at.isoformat() if started_at else None,
                     "elapsed_s": round(elapsed_s, 1),
                     "latest": {
@@ -106,16 +128,38 @@ class AdminService:
                         "accuracy_m": latest.accuracy_m if latest else None,
                         "accel_mag_mps2": _accel_magnitude(latest),
                         "longitudinal_accel_mps2": _longitudinal_accel(prev, latest),
+                        "lateral_accel_mps2": _lateral_accel(latest),
+                        "vertical_accel_mps2": _vertical_accel(latest),
                     },
                     "samples_uploaded": sample_count,
                     "event_counts": counts,
                     "event_total": int(sum(counts.values())),
-                    "live_score": _provisional_live_score(counts, elapsed_s),
+                    "live_score": _provisional_live_score(counts, elapsed_s, cfg),
                     "connection_status": _connection_status(last_sample_age_s),
                     "last_sample_age_s": last_sample_age_s,
                 }
             )
         return results
+
+    def get_live_trip_telemetry(self, actor: UserRecord, trip_id: str) -> dict:
+        """Live telemetry for ANY trip (admin only, Phase 7 fleet -> detail).
+
+        The driver-scoped endpoint serves only the caller's own trip; admins
+        opening a live trip from the fleet dashboard need the same payload for
+        whichever driver's trip they are inspecting.
+        """
+        self._require_admin(actor)
+        trip = self.db.execute(
+            select(Trip).where(Trip.id == trip_id)
+        ).scalar_one_or_none()
+        if trip is None:
+            raise NotFoundError(message_key="trip.not_found")
+        from app.services.live_monitor_service import LiveMonitorService
+
+        return LiveMonitorService(self.db).get_trip_telemetry(
+            user_id=trip.user_id,
+            trip_id=trip.id,
+        )
 
     def list_all_trips(self, actor: UserRecord, limit: int = 200, offset: int = 0) -> list[Trip]:
         """List trips across all drivers (admin only), most recent first, paginated."""
@@ -336,6 +380,41 @@ class AdminService:
             email=email,
             password_hash=password_hash,
         )
+
+    def get_trip_samples(self, actor: UserRecord, trip_id: str, limit: int = 3000) -> dict:
+        """Raw sensor timeline for ANY trip (admin only, replay/forensics).
+
+        Returns the per-sample timeline (speed, GPS, IMU axes) so the admin
+        replay UI can scrub through the trip with the 3D vehicle, sensor
+        traces and events synchronized to the same clock.
+        """
+        self._require_admin(actor)
+        trip = self.db.execute(
+            select(Trip).where(Trip.id == trip_id)
+        ).scalar_one_or_none()
+        if trip is None:
+            raise NotFoundError(message_key="trip.not_found")
+
+        rows = SensorSampleRepository(self.db).list_by_trip(
+            user_id=trip.user_id,
+            trip_id=trip.id,
+            limit=limit,
+        )
+        samples = [
+            {
+                "ts": as_utc_timestamp(sample.ts),
+                "speed_mps": sample.speed_mps,
+                "lat": sample.lat,
+                "lon": sample.lon,
+                "accuracy_m": sample.accuracy_m,
+                "ax": sample.ax,
+                "ay": sample.ay,
+                "az": sample.az,
+                "gz": sample.gz,
+            }
+            for sample in rows
+        ]
+        return {"trip_id": trip.id, "count": len(samples), "samples": samples}
 
     def get_trip_route(self, actor: UserRecord, trip_id: str) -> dict:
         """Get route for ANY trip (admin only, no driver_id needed)."""

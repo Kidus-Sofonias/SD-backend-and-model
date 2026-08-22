@@ -31,7 +31,10 @@ from app.core.errors import AppError
 from app.core.utils import as_utc_timestamp
 from app.db.init_db import ensure_driving_event_id_sequence, ensure_sensor_sample_id_sequence
 from app.db.models.trip import Trip
+from app.db.models.vehicle_profile import VehicleProfile
 from app.db.session import get_db
+from app.ml.config import FeatureConfigV2
+from app.ml.vehicle_profiles import config_for_profile
 from app.realtime.accident_detector import accident_detector
 from app.realtime.live_detector import live_alert_detector
 from app.repositories.sensor_sample_repository import SensorSampleRepository
@@ -45,6 +48,7 @@ from app.schemas.trip import (
     TripReviewDashboardItemOut,
     TripReviewLabelIn,
     TripReviewOut,
+    TripStartRequest,
 )
 from app.services.trip_processing_service import TripProcessingService
 from app.services.route_snap_service import RouteSnapService
@@ -139,6 +143,7 @@ def active_trip(
 
 @router.post("/start", response_model=TripOut)
 def start_trip(
+    payload: TripStartRequest | None = None,
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
@@ -148,7 +153,32 @@ def start_trip(
     if active:
         raise HTTPException(status_code=400, detail="You already have an active trip")
 
-    return repo.create_trip(user_id=user.id)
+    # Phase 3: resolve the vehicle profile for this trip (explicit id first,
+    # else the driver's saved profile) so detection and live alerts are
+    # tuned to the vehicle's physical expectations.
+    profile = None
+    if payload and payload.vehicle_profile_id:
+        profile = db.get(VehicleProfile, payload.vehicle_profile_id)
+        if profile is None or profile.user_id != user.id:
+            raise HTTPException(status_code=404, detail="Vehicle profile not found")
+    else:
+        profile = db.execute(
+            select(VehicleProfile).where(VehicleProfile.user_id == user.id)
+        ).scalar_one_or_none()
+
+    trip = repo.create_trip(
+        user_id=user.id,
+        vehicle_profile_id=profile.id if profile else None,
+    )
+
+    # Phase 5: bind the vehicle-tuned config so live alerts use the driver's
+    # thresholds (a truck's ~-1.6 m/s^2 hard-brake floor, not the sedan's
+    # -3.2 m/s^2). The detector falls back to the universal default otherwise.
+    live_alert_detector.set_trip_config(
+        trip.id,
+        config_for_profile(FeatureConfigV2(), profile),
+    )
+    return trip
 
 
 @router.post("/{trip_id}/end", response_model=TripOut)
@@ -244,6 +274,44 @@ def get_trip_route(
         snapped_source=snap_result.source,
         snapped_status=snap_result.status,
     )
+
+
+@router.get("/{trip_id}/samples")
+def get_trip_samples(
+    trip_id: str,
+    limit: int = Query(default=3000, ge=1, le=10000),
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user),
+):
+    """Raw sensor timeline for the caller's own trip (replay).
+
+    Returns the full per-sample timeline (speed, GPS, IMU axes) so the app can
+    drive a synchronized replay: 3D vehicle motion, speed/acceleration traces
+    and event positions on one scrubber. This is the driver-side twin of the
+    admin samples endpoint.
+    """
+    repo = SqlTripRepository(db)
+    trip = repo.get_by_id(trip_id=trip_id, user_id=user.id)
+    if not trip:
+        raise HTTPException(status_code=404, detail="Trip not found")
+
+    sample_repo = SensorSampleRepository(db)
+    rows = sample_repo.list_by_trip(user_id=user.id, trip_id=trip_id, limit=limit)
+    samples = [
+        {
+            "ts": as_utc_timestamp(sample.ts),
+            "speed_mps": sample.speed_mps,
+            "lat": sample.lat,
+            "lon": sample.lon,
+            "accuracy_m": sample.accuracy_m,
+            "ax": sample.ax,
+            "ay": sample.ay,
+            "az": sample.az,
+            "gz": sample.gz,
+        }
+        for sample in rows
+    ]
+    return {"trip_id": trip.id, "count": len(samples), "samples": samples}
 
 
 @router.get("/{trip_id}/summary", response_model=TripDetailOut)

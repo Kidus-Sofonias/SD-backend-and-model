@@ -17,9 +17,10 @@ class SqlTripRepository:
         stmt = select(Trip).where(Trip.id == trip_id, Trip.user_id == user_id)
         return self.db.execute(stmt).scalar_one_or_none()
 
-    def create_trip(self, user_id: str) -> Trip:
+    def create_trip(self, user_id: str, vehicle_profile_id: str | None = None) -> Trip:
         t = Trip(
             user_id=user_id,
+            vehicle_profile_id=vehicle_profile_id,
             started_at=datetime.now(timezone.utc),
             ended_at=None,
             status="active",

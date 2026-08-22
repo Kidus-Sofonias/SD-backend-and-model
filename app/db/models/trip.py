@@ -12,7 +12,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -20,6 +20,7 @@ from app.db.base import Base
 
 class Trip(Base):
     __tablename__ = "trips"
+    __table_args__ = (Index("ix_trips_user_source_trip_id", "user_id", "source_trip_id", unique=True),)
 
     id: Mapped[str] = mapped_column(
         String,
@@ -29,6 +30,16 @@ class Trip(Base):
     )
 
     user_id: Mapped[str] = mapped_column(String, ForeignKey("users.id"), nullable=False, index=True)
+    source_trip_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    # Phase 3 (hackathon): the vehicle used for this trip (nullable — old trips
+    # and users without a vehicle profile have none).
+    vehicle_profile_id: Mapped[str | None] = mapped_column(
+        String,
+        ForeignKey("vehicle_profiles.id"),
+        nullable=True,
+        index=True,
+    )
 
     started_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

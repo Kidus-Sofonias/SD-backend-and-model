@@ -35,9 +35,12 @@ from sqlalchemy import select
 from app.db.session import SessionLocal
 from app.db.models.trip import Trip
 from app.db.models.sensor_sample import SensorSample
+from app.db.models.vehicle_profile import VehicleProfile
 from app.ml.config import FeatureConfigV2
+from app.ml.labels import review_label_tier
 from app.ml.pipeline import run_trip_pipeline
 from app.ml.schemas import FEATURE_VERSION
+from app.ml.vehicle_profiles import config_for_profile, resolve_mass_kg
 from scripts.reporting_utils import build_dataset_summary
 
 
@@ -103,14 +106,13 @@ def choose_label(
     Label priority (highest to lowest):
       1. Human-reviewed label (trip.reviewed_label or reviewed_labels registry)
       2. Synthetic ground-truth label (strong_labels — from generator, known ground truth)
-      3. Weak rule-based label (from rule_score — useful when ground truth unknown)
-      4. Synthetic bootstrap label (from old synthetic_registry — lowest confidence)
+      3. Demo review label (seed script — score-derived showcase labels, NOT human ground truth)
+      4. Weak rule-based label (from rule_score — useful when ground truth unknown)
+      5. Synthetic bootstrap label (from old synthetic_registry — lowest confidence)
     """
     if trip.reviewed_label is not None:
         reviewed_source = (trip.reviewed_label_source or "reviewed_real").strip() or "reviewed_real"
-        if "synthetic" in reviewed_source.lower():
-            return int(trip.reviewed_label), reviewed_source, "reviewed_synthetic"
-        return int(trip.reviewed_label), reviewed_source, "reviewed_real"
+        return int(trip.reviewed_label), reviewed_source, review_label_tier(trip.reviewed_label_source)
 
     if trip.id in reviewed_labels:
         return reviewed_labels[trip.id], "reviewed_registry", "reviewed_real"
@@ -139,8 +141,14 @@ def _class_counts(rows: list[dict]) -> dict[int, int]:
 def select_rows_for_training(rows: list[dict]) -> tuple[list[dict], dict[str, dict[int, int] | int]]:
     priority_order = [
         "reviewed_real",
+        # External benchmark labels (e.g. Kaggle driving-behavior dataset):
+        # strong ground truth, below human admin reviews but above everything else.
+        "reviewed_external",
         "reviewed_synthetic",
         "synthetic_ground_truth",  # Ground-truth from generator — stronger than weak rules
+        # Demo reviews are score-derived showcase labels from the seed script;
+        # they rank below generator ground truth but above weak rule labels.
+        "reviewed_demo",
         "weak_label",
         "synthetic_bootstrap",
     ]
@@ -192,7 +200,7 @@ def main() -> dict[str, Any] | None:
     print(f"Loaded {len(reviewed_labels)} reviewed labels from {REVIEWED_LABELS_PATH}")
 
     db = SessionLocal()
-    cfg = FeatureConfigV2()
+    base_cfg = FeatureConfigV2()
 
     try:
         trips = db.execute(
@@ -204,6 +212,17 @@ def main() -> dict[str, Any] | None:
         candidate_rows = []
         skipped_no_features = 0
         skipped_unlabeled = 0
+
+        # Phase 8b: load the vehicle profiles referenced by the trips up front
+        # so each trip is scored through its own vehicle-tuned detection config
+        # (config_for_profile). Trips without a profile use the universal default.
+        profile_ids = {t.vehicle_profile_id for t in trips if t.vehicle_profile_id}
+        profiles: dict[str, VehicleProfile] = {}
+        if profile_ids:
+            for profile in db.execute(
+                select(VehicleProfile).where(VehicleProfile.id.in_(profile_ids))
+            ).scalars().all():
+                profiles[profile.id] = profile
 
         for trip in trips:
             sample_rows = db.execute(
@@ -230,7 +249,12 @@ def main() -> dict[str, Any] | None:
                     "gz": row.gz,
                 })
 
-            result = run_trip_pipeline(samples, cfg)
+            # Phase 8b: the vehicle profile tunes detection thresholds for THIS
+            # trip (sedan vs truck), so the feature values the model trains on
+            # reflect the same vehicle-aware signal the runtime uses.
+            profile = profiles.get(trip.vehicle_profile_id) if trip.vehicle_profile_id else None
+            cfg = config_for_profile(base_cfg, profile)
+            result = run_trip_pipeline(samples, cfg, vehicle_profile=profile)
             trip_features = result["trip_features"]
             rule_score = result["score"]
 
@@ -255,6 +279,13 @@ def main() -> dict[str, Any] | None:
                 "feature_version": FEATURE_VERSION,
                 "model_version": trip.model_version,
                 "processed_at": trip.processed_at.isoformat() if trip.processed_at else None,
+                # Phase 8b: vehicle context columns for analysis/stratification.
+                "vehicle_category": profile.category if profile else None,
+                "vehicle_mass_kg": resolve_mass_kg(
+                    profile.category,
+                    size_class=profile.size_class,
+                    mass_kg=profile.mass_kg,
+                ) if profile else None,
                 **trip_features,
                 "rule_score": rule_score,
                 "label_binary": int(label_binary),

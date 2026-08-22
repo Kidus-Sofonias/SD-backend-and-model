@@ -106,7 +106,7 @@ def test_live_telemetry_returns_speed_accel_location_and_counts(tmp_path: Path) 
         assert live_score["provisional"] is True
         assert 0 <= live_score["score"] <= 100
         assert live_score["risk_level"] in ("low", "medium", "high")
-        assert live_score["scoring_version"] == "v2-live"
+        assert live_score["scoring_version"] == "v3-live"
 
         latest = payload["latest"]
         assert latest["speed_mps"] == rows[-1]["speed"]

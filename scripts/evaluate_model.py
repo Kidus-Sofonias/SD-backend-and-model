@@ -67,7 +67,14 @@ def main():
             stratify=None,
         )
 
-    metadata_files = sorted(MODELS_DIR.glob(f"metadata_{FEATURE_VERSION}_*.json"))
+    # Pick the MOST RECENTLY TRAINED model. Lexical sort is wrong here: the
+    # legacy "metadata_fv1_lr_v1.json" (March 2026) sorts AFTER timestamped
+    # versions ("v1" > "2026...") and was loaded instead of the newest model,
+    # causing a feature-name mismatch on evaluation. mtime is unambiguous.
+    metadata_files = sorted(
+        MODELS_DIR.glob(f"metadata_{FEATURE_VERSION}_*.json"),
+        key=lambda path: path.stat().st_mtime,
+    )
     if not metadata_files:
         raise FileNotFoundError("No model metadata found")
 

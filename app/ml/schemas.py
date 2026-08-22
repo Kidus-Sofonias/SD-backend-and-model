@@ -29,4 +29,11 @@ FEATURE_COLUMNS_FV1 = [
     "mean_event_duration_s",
     "max_event_duration_s",
     "max_consecutive_event_run_s",
+    # Phase 8b (hackathon): vehicle-aware context. The log-mass of the trip's
+    # vehicle lets the model condition its risk reading on the vehicle class:
+    # the same event counts mean different things for a sedan (1400 kg) and a
+    # 36 t tractor-trailer, because detection thresholds are tuned per vehicle
+    # (config_for_profile). Log scale keeps the 1400..36000 kg range tractable
+    # for both scaled-LR and tree models.
+    "log_vehicle_mass_kg",
 ]

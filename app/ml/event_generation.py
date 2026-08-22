@@ -15,7 +15,12 @@ import numpy as np
 import pandas as pd
 
 from .braking import classify_brake_segment
-from .event_utils import event_segments
+from .event_utils import (
+    apply_cooldown,
+    event_segments,
+    event_severity_and_confidence,
+    filter_net_speed_delta,
+)
 
 UNSTABLE_MOTION_JERK_THRESHOLD = 2.5
 
@@ -47,11 +52,17 @@ def _build_event_payload(
     index: int,
     event_type: str,
     value: float,
+    severity: float,
+    confidence: float,
+    duration_s: float,
 ) -> dict:
     row = per.iloc[index]
     return {
         "event_type": event_type,
         "value": float(value),
+        "severity": round(float(severity), 4),
+        "confidence": round(float(confidence), 4),
+        "duration_s": round(float(duration_s), 3),
         "occurred_at": _isoformat_timestamp(row.get("timestamp")),
         "lat": _float_or_none(row.get("lat")),
         "lon": _float_or_none(row.get("lon")),
@@ -84,6 +95,18 @@ def generate_trip_events(
     overspeed_min_duration_s: float,
     severe_overspeed_threshold_mps: float,
     severe_overspeed_min_duration_s: float,
+    event_cooldown_s: float = 0.0,
+    dv_min_speed_delta_mps: float = 0.0,
+    dv_single_sample_peak_mps2: float = 0.0,
+    nominal_dt_s: float = 0.5,
+    unstable_cooldown_s: float = 0.0,
+    turn_min_speed_mps: float = 0.0,
+    brake_severity_ref_mps2: float = 6.5,
+    accel_severity_ref_mps2: float = 6.5,
+    turn_severity_ref_mps2: float = 8.8,
+    unstable_severity_ref_mps3: float = 6.0,
+    overspeed_severity_ref_mps: float = 33.3,
+    severe_overspeed_severity_ref_mps: float = 38.9,
 ) -> list[dict]:
     """
     Build persisted driving-event instances with their own timestamps and coordinates.
@@ -100,11 +123,20 @@ def generate_trip_events(
     speed = per["speed_s"].to_numpy()
     speed_raw = per["speed"].to_numpy(dtype=float)
     lateral = per["lateral_accel"].to_numpy()
-    jerk_raw = per["jerk_mag_raw"].to_numpy()
+    jerk_raw_norm = per["jerk_mag_raw_norm"].to_numpy()
 
     events: list[dict] = []
 
-    harsh_brake_segments = event_segments(dv < harsh_brake_dv, t, min_event_duration_s, merge_gap_s)
+    # Phase 10: FILTER first (windowed net speed change + extreme-peak escape),
+    # THEN cooldown (see features.py; kept identical so live detection matches
+    # finalize). Rough road gets its own longer cooldown.
+    harsh_brake_segments = filter_net_speed_delta(
+        event_segments(dv < harsh_brake_dv, t, min_event_duration_s, merge_gap_s),
+        speed_raw,
+        direction=-1, min_delta_mps=dv_min_speed_delta_mps,
+        extreme_peak_mps2=dv_single_sample_peak_mps2, nominal_dt_s=nominal_dt_s,
+    )
+    harsh_brake_segments = apply_cooldown(harsh_brake_segments, t, event_cooldown_s)
     for start, end in harsh_brake_segments:
         peak_idx = _peak_index(dv, start, end, mode="min")
         event_type = classify_brake_segment(
@@ -115,53 +147,114 @@ def generate_trip_events(
             emergency_brake_dv=emergency_brake_dv,
             emergency_brake_min_speed_mps=emergency_brake_min_speed_mps,
         )
+        peak = abs(float(dv[peak_idx]))
+        duration_s = max(0.0, float(t[end] - t[start]))
+        severity, confidence = event_severity_and_confidence(
+            event_type=event_type,
+            value=peak,
+            duration_s=duration_s,
+            activation=abs(harsh_brake_dv),
+            reference=brake_severity_ref_mps2,
+        )
         events.append(
             _build_event_payload(
                 per,
                 index=peak_idx,
                 event_type=event_type,
-                value=abs(float(dv[peak_idx])),
+                value=peak,
+                severity=severity,
+                confidence=confidence,
+                duration_s=duration_s,
             )
         )
 
-    harsh_accel_segments = event_segments(dv > harsh_accel_dv, t, min_event_duration_s, merge_gap_s)
+    harsh_accel_segments = filter_net_speed_delta(
+        event_segments(dv > harsh_accel_dv, t, min_event_duration_s, merge_gap_s),
+        speed_raw,
+        direction=1, min_delta_mps=dv_min_speed_delta_mps,
+        extreme_peak_mps2=dv_single_sample_peak_mps2, nominal_dt_s=nominal_dt_s,
+    )
+    harsh_accel_segments = apply_cooldown(harsh_accel_segments, t, event_cooldown_s)
     for start, end in harsh_accel_segments:
         peak_idx = _peak_index(dv, start, end, mode="max")
+        peak = float(dv[peak_idx])
+        duration_s = max(0.0, float(t[end] - t[start]))
+        severity, confidence = event_severity_and_confidence(
+            event_type="hard_accel",
+            value=peak,
+            duration_s=duration_s,
+            activation=abs(harsh_accel_dv),
+            reference=accel_severity_ref_mps2,
+        )
         events.append(
             _build_event_payload(
                 per,
                 index=peak_idx,
                 event_type="hard_accel",
-                value=float(dv[peak_idx]),
+                value=peak,
+                severity=severity,
+                confidence=confidence,
+                duration_s=duration_s,
             )
         )
 
-    aggressive_turn_segments = event_segments(lateral > aggressive_turn_threshold, t, turn_min_duration_s, merge_gap_s)
+    aggressive_turn_segments = event_segments(
+        (lateral > aggressive_turn_threshold) & (speed_raw >= turn_min_speed_mps),
+        t,
+        turn_min_duration_s,
+        merge_gap_s,
+        event_cooldown_s,
+    )
     for start, end in aggressive_turn_segments:
         peak_idx = _peak_index(lateral, start, end, mode="max")
+        peak = float(lateral[peak_idx])
+        duration_s = max(0.0, float(t[end] - t[start]))
+        severity, confidence = event_severity_and_confidence(
+            event_type="aggressive_turn",
+            value=peak,
+            duration_s=duration_s,
+            activation=aggressive_turn_threshold,
+            reference=turn_severity_ref_mps2,
+        )
         events.append(
             _build_event_payload(
                 per,
                 index=peak_idx,
                 event_type="aggressive_turn",
-                value=float(lateral[peak_idx]),
+                value=peak,
+                severity=severity,
+                confidence=confidence,
+                duration_s=duration_s,
             )
         )
 
     unstable_motion_segments = event_segments(
-        jerk_raw >= unstable_motion_jerk_threshold,
+        jerk_raw_norm >= unstable_motion_jerk_threshold,
         t,
         min_event_duration_s,
         merge_gap_s,
+        unstable_cooldown_s,
     )
     for start, end in unstable_motion_segments:
-        peak_idx = _peak_index(jerk_raw, start, end, mode="max")
+        peak_idx = _peak_index(jerk_raw_norm, start, end, mode="max")
+        peak = float(jerk_raw_norm[peak_idx])
+        duration_s = max(0.0, float(t[end] - t[start]))
+        severity, confidence = event_severity_and_confidence(
+            event_type="unstable_motion",
+            value=peak,
+            duration_s=duration_s,
+            activation=unstable_motion_jerk_threshold,
+            reference=unstable_severity_ref_mps3,
+        )
         events.append(
             _build_event_payload(
                 per,
                 index=peak_idx,
                 event_type="unstable_motion",
-                value=float(jerk_raw[peak_idx]),
+                value=peak,
+                severity=severity,
+                confidence=confidence,
+                duration_s=duration_s,
             )
         )
 
@@ -170,15 +263,28 @@ def generate_trip_events(
         t,
         overspeed_min_duration_s,
         merge_gap_s,
+        event_cooldown_s,
     )
     for start, end in overspeed_segments:
         peak_idx = _peak_index(speed_raw, start, end, mode="max")
+        peak = float(speed_raw[peak_idx])
+        duration_s = max(0.0, float(t[end] - t[start]))
+        severity, confidence = event_severity_and_confidence(
+            event_type="overspeed",
+            value=peak,
+            duration_s=duration_s,
+            activation=overspeed_threshold_mps,
+            reference=overspeed_severity_ref_mps,
+        )
         events.append(
             _build_event_payload(
                 per,
                 index=peak_idx,
                 event_type="overspeed",
-                value=float(speed_raw[peak_idx]),
+                value=peak,
+                severity=severity,
+                confidence=confidence,
+                duration_s=duration_s,
             )
         )
 
@@ -187,15 +293,28 @@ def generate_trip_events(
         t,
         severe_overspeed_min_duration_s,
         merge_gap_s,
+        event_cooldown_s,
     )
     for start, end in severe_overspeed_segments:
         peak_idx = _peak_index(speed_raw, start, end, mode="max")
+        peak = float(speed_raw[peak_idx])
+        duration_s = max(0.0, float(t[end] - t[start]))
+        severity, confidence = event_severity_and_confidence(
+            event_type="severe_overspeed",
+            value=peak,
+            duration_s=duration_s,
+            activation=severe_overspeed_threshold_mps,
+            reference=severe_overspeed_severity_ref_mps,
+        )
         events.append(
             _build_event_payload(
                 per,
                 index=peak_idx,
                 event_type="severe_overspeed",
-                value=float(speed_raw[peak_idx]),
+                value=peak,
+                severity=severity,
+                confidence=confidence,
+                duration_s=duration_s,
             )
         )
 

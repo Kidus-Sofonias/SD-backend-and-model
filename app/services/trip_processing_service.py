@@ -24,11 +24,13 @@ from sqlalchemy import func
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.errors import ForbiddenError
 from app.db.models.driving_event import DrivingEvent
 from app.db.models.sensor_sample import SensorSample
 from app.db.models.trip import Trip
 from app.db.models.user import User
+from app.db.models.vehicle_profile import VehicleProfile
 from app.db.session import commit_with_retry
 from app.ml.auto_retrain import maybe_schedule_auto_retrain
 from app.ml.config import FeatureConfigV2
@@ -36,6 +38,7 @@ from app.ml.event_generation import build_human_reasons
 from app.ml.inference import ModelScorer
 from app.ml.pipeline import run_trip_pipeline
 from app.ml.schemas import MODEL_VERSION_RULES_V1
+from app.ml.vehicle_profiles import config_for_profile
 from app.repositories.trip_repository import SqlTripRepository
 from app.repositories.user_repository import UserRecord
 
@@ -187,6 +190,20 @@ class TripProcessingService:
             ).scalar_one()
             or 0
         )
+
+    def _count_reviewed_real_trips(self) -> int:
+        """Count trips carrying a REAL human review label (admin review screen).
+
+        Classified via the shared review-label tier helper (case-safe on both
+        SQLite and PostgreSQL) so the review-gated retrain trigger only counts
+        genuine human ground truth, never demo or synthetic sources.
+        """
+        from app.ml.labels import is_real_review_source
+
+        sources = self.db.execute(
+            select(Trip.reviewed_label_source).where(Trip.reviewed_label.is_not(None))
+        ).scalars().all()
+        return sum(1 for source in sources if is_real_review_source(source))
 
     def _samples_to_payload(self, rows: list[SensorSample]) -> list[dict]:
         payload: list[dict] = []
@@ -359,6 +376,9 @@ class TripProcessingService:
                 "trip_id": ev.trip_id,
                 "event_type": ev.event_type,
                 "value": float(ev.value),
+                "confidence": ev.confidence,
+                "severity": ev.severity,
+                "duration_s": ev.duration_s,
                 "occurred_at": ev.occurred_at,
                 "lat": ev.lat,
                 "lon": ev.lon,
@@ -464,6 +484,7 @@ class TripProcessingService:
             "trip_id": trip.id,
             "driver_user_id": trip.user_id,
             "driver_email": driver_email,
+            "status": trip.status,
             "score": trip.score,
             "risk_level": trip.risk_level,
             "risk_probability": trip.risk_probability,
@@ -493,7 +514,7 @@ class TripProcessingService:
     def get_trip_detail(self, actor: UserRecord, trip_id: str) -> dict:
         trip = self._load_trip_for_actor(actor=actor, trip_id=trip_id)
         breakdown = self._load_breakdown(trip)
-        return {
+        response = {
             "id": trip.id,
             "user_id": trip.user_id,
             "started_at": trip.started_at,
@@ -501,6 +522,18 @@ class TripProcessingService:
             "status": trip.status,
             **self._build_response(trip, breakdown, already_processed=False),
         }
+        # Phase 9: expose the vehicle class that drove this trip so the 3D
+        # replay renders the correct model. Prefer the class recorded at
+        # finalize; fall back to the driver's current profile for older trips
+        # that predate vehicle-aware finalization.
+        vehicle_category = breakdown.get("vehicle_category")
+        if not vehicle_category:
+            profile = self.db.execute(
+                select(VehicleProfile).where(VehicleProfile.user_id == trip.user_id)
+            ).scalar_one_or_none()
+            vehicle_category = profile.category if profile else None
+        response["vehicle_category"] = vehicle_category
+        return response
 
     def list_review_dashboard(self, actor: UserRecord, limit: int = 50) -> list[dict]:
         self._require_admin(actor)
@@ -640,7 +673,23 @@ class TripProcessingService:
         if self.db.in_transaction():
             self.db.rollback()
 
-        pipeline_result = run_trip_pipeline(sample_payload, self.cfg)
+        # Phase 3 (hackathon): vehicle-aware detection. The driver's vehicle
+        # profile tunes the event thresholds (heavier vehicles are more
+        # sensitive to longitudinal/lateral events, more tolerant of vertical
+        # motion). Falls back to the universal default when no profile exists.
+        vehicle_profile = self.db.execute(
+            select(VehicleProfile).where(VehicleProfile.user_id == user_id)
+        ).scalar_one_or_none()
+        vehicle_cfg = config_for_profile(self.cfg, vehicle_profile)
+
+        # Phase 8b: pass the profile into the pipeline so the persisted
+        # trip_features include log_vehicle_mass_kg — the model contract
+        # (FEATURE_COLUMNS_FV1) expects it for every scored trip.
+        pipeline_result = run_trip_pipeline(
+            sample_payload,
+            vehicle_cfg,
+            vehicle_profile=vehicle_profile,
+        )
 
         trip_features = pipeline_result["trip_features"]
         rule_score = pipeline_result["score"]
@@ -727,6 +776,7 @@ class TripProcessingService:
         persisted_breakdown = {
             "rule_score": rule_score,
             "rule_breakdown": rule_breakdown,
+            "vehicle_category": vehicle_profile.category if vehicle_profile else None,
             "ml_prediction": ml_prediction,
             "ml_risk_probability": ml_risk_probability,
             "ml_blend_weight": ml_blend_weight,
@@ -741,6 +791,7 @@ class TripProcessingService:
         }
 
         trip = self._load_trip(user_id=user_id, trip_id=trip_id)
+        trip.vehicle_profile_id = vehicle_profile.id if vehicle_profile else None
         trip.score = final_score
         trip.score_breakdown = json.dumps(persisted_breakdown)
         trip.feature_version = feature_version
@@ -777,7 +828,13 @@ class TripProcessingService:
 
         if not force_reprocess:
             try:
-                maybe_schedule_auto_retrain(completed_trip_count=self._count_completed_trips())
+                reviewed_trip_count = (
+                    self._count_reviewed_real_trips() if settings.auto_retrain_enabled else None
+                )
+                maybe_schedule_auto_retrain(
+                    completed_trip_count=self._count_completed_trips(),
+                    reviewed_trip_count=reviewed_trip_count,
+                )
             except Exception:
                 logger.exception("Failed to schedule automatic retraining after trip finalization.")
 
@@ -812,6 +869,9 @@ class TripProcessingService:
                 trip_id=trip_id,
                 event_type=item["event_type"],
                 value=float(item["value"]),
+                confidence=item.get("confidence"),
+                severity=item.get("severity"),
+                duration_s=item.get("duration_s"),
                 occurred_at=occurred_at,
                 lat=item.get("lat"),
                 lon=item.get("lon"),

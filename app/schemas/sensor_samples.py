@@ -29,6 +29,10 @@ class SensorSampleIn(BaseModel):
     gy: Optional[float] = None
     gz: Optional[float] = None
 
+    # True when the phone was being handled (picked up / adjusted) rather than
+    # sitting still in the vehicle — see SensorSample.phone_handling.
+    phone_handling: Optional[bool] = None
+
 
 class SensorSamplesBatchIn(BaseModel):
     samples: List[SensorSampleIn] = Field(..., min_length=1, max_length=5000)

@@ -83,6 +83,19 @@ def _features(speeds: list[float], *, ax_noise: float = 0.1) -> dict:
         overspeed_min_duration_s=cfg.overspeed_min_duration_s,
         severe_overspeed_threshold_mps=cfg.severe_overspeed_threshold_mps,
         severe_overspeed_min_duration_s=cfg.severe_overspeed_min_duration_s,
+        # Phase 10: production noise-robustness settings.
+        event_cooldown_s=cfg.event_cooldown_s,
+        dv_min_speed_delta_mps=cfg.dv_min_speed_delta_mps,
+        turn_min_speed_mps=cfg.turn_min_speed_mps,
+        nominal_dt_s=cfg.nominal_dt_s,
+        brake_severity_ref_mps2=cfg.brake_severity_ref_mps2,
+        accel_severity_ref_mps2=cfg.accel_severity_ref_mps2,
+        turn_severity_ref_mps2=cfg.turn_severity_ref_mps2,
+        unstable_severity_ref_mps3=cfg.unstable_severity_ref_mps3,
+        overspeed_severity_ref_mps=cfg.overspeed_severity_ref_mps,
+        severe_overspeed_severity_ref_mps=cfg.severe_overspeed_severity_ref_mps,
+        density_distance_normalize_high=cfg.density_distance_normalize_high,
+        density_min_duration_s=cfg.density_min_duration_s,
     )
 
 

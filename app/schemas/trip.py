@@ -12,8 +12,9 @@ from app.schemas.events import DrivingEventOut
 
 
 class TripStartRequest(BaseModel):
-    # keep it optional for now (frontend can send empty body)
-    pass
+    # Phase 3 (hackathon): optional vehicle used for this trip so the backend
+    # can tune detection and record vehicle context for admin replay.
+    vehicle_profile_id: str | None = None
 
 
 class TripEndRequest(BaseModel):
@@ -49,6 +50,10 @@ class TripDetailOut(TripOut):
     breakdown: dict[str, Any] = Field(default_factory=dict)
     trip_features: dict[str, Any] = Field(default_factory=dict)
     events_generated: int | None = None
+    # Phase 3/9: vehicle class that drove this trip (from the trip's recorded
+    # breakdown, falling back to the driver's current profile). Lets the 3D
+    # replay and live views render the correct vehicle model.
+    vehicle_category: str | None = None
 
 
 class TripSummaryOut(BaseModel):
@@ -89,6 +94,7 @@ class TripReviewOut(BaseModel):
     trip_id: str
     driver_user_id: str | None = None
     driver_email: str | None = None
+    status: str | None = None
     score: int | None = None
     risk_level: str | None = None
     risk_probability: float | None = None
