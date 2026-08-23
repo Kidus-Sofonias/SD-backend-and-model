@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     # Set SECRET_KEY to a strong random value in production.
     # Set ADMIN_PASSWORD to a strong password.
     secret_key: str = ""
-    access_token_expire_minutes: int = 1440
+    access_token_expire_minutes: int = 20160  # 14 days
     admin_email: str = "admin@sdb.com"
     admin_password: str = ""
 
