@@ -45,7 +45,12 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    # Request ID middleware (innermost — runs after CORS)
+    app.add_middleware(RequestIDMiddleware)
+
     # CORS: use permissive middleware in development, restricted in production
+    # Must be added AFTER other middleware so it wraps them and always adds
+    # Access-Control-Allow-Origin headers, even on error responses.
     if settings.debug:
         app.add_middleware(
             CORSMiddleware,
@@ -62,7 +67,6 @@ def create_app() -> FastAPI:
             allow_methods=["*"],
             allow_headers=["*"],
         )
-    app.add_middleware(RequestIDMiddleware)
 
     # Router
     app.include_router(api_v1_router, prefix="/api/v1")
