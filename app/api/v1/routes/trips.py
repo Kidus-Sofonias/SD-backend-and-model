@@ -19,12 +19,17 @@ from __future__ import annotations
 
 import logging
 import traceback
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
+
+# Minimum trip duration in seconds — trips shorter than this are rejected
+# during finalize to prevent accidental instant-start/stop pairs.
+MIN_TRIP_DURATION_SECONDS = 300  # 5 minutes
 
 from app.api.deps import get_current_user
 from app.core.errors import AppError
@@ -188,6 +193,15 @@ def end_trip(
     user=Depends(get_current_user),
 ):
     repo = SqlTripRepository(db)
+    # Enforce minimum trip duration — block end if too short.
+    existing = repo.get_by_id(trip_id=trip_id, user_id=user.id)
+    if existing and existing.started_at:
+        elapsed = (datetime.now(timezone.utc) - existing.started_at.replace(tzinfo=timezone.utc)).total_seconds()
+        if elapsed < MIN_TRIP_DURATION_SECONDS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Trip too short ({int(elapsed)}s). Minimum is {MIN_TRIP_DURATION_SECONDS}s.",
+            )
     trip = repo.end_trip(trip_id=trip_id, user_id=user.id)
     if trip:
         # Phase 5/8: release the in-memory detection state for this trip
@@ -333,6 +347,18 @@ def finalize_trip(
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
 ):
+    # Reject trips shorter than MIN_TRIP_DURATION_SECONDS to prevent
+    # accidental instant start/stop pairs from polluting the dataset.
+    repo = SqlTripRepository(db)
+    trip = repo.get_by_id(trip_id=trip_id, user_id=user.id)
+    if trip and trip.started_at and trip.ended_at:
+        duration = (trip.ended_at - trip.started_at).total_seconds()
+        if duration < MIN_TRIP_DURATION_SECONDS and not force_reprocess:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Trip too short ({int(duration)}s). Minimum is {MIN_TRIP_DURATION_SECONDS}s.",
+            )
+
     service = TripProcessingService(db)
 
     return _run_finalize_with_recovery(

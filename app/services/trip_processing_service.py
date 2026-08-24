@@ -533,6 +533,13 @@ class TripProcessingService:
             ).scalar_one_or_none()
             vehicle_category = profile.category if profile else None
         response["vehicle_category"] = vehicle_category
+        # Expose ML review detail fields so the trip detail view can render
+        # rule_score, predicted_label, and model_influence.
+        response["rule_score"] = breakdown.get("rule_score")
+        response["ml_prediction"] = breakdown.get("ml_prediction")
+        response["predicted_label"] = self._prediction_label(
+            risk_probability=trip.risk_probability, breakdown=breakdown
+        )
         return response
 
     def list_review_dashboard(self, actor: UserRecord, limit: int = 50) -> list[dict]:
